@@ -28,7 +28,7 @@ export default function Home() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#071018", padding: 0, margin: 0 },
+  safe: { flex: 1, backgroundColor: "#171717", padding: 0, margin: 0 },
   container: {
     flex: 1,
     alignItems: "center",
@@ -48,7 +48,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 14,
     paddingHorizontal: 18,
-    backgroundColor: "#153548",
+    backgroundColor: "#171717",
     borderWidth: 1,
     borderColor: "#3f708c",
   },

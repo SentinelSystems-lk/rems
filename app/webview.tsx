@@ -13,7 +13,37 @@ function getSourceUri(mode: string | string[] | undefined) {
     return "https://cmms.sentinel.lk/cmms";
   }
 
-  return "https://7s6i6.sentinel.lk/";
+  return "https://7s6i6.sentinel.lk/login";
+}
+
+function getForceDarkScript() {
+  return `(function() {
+    try {
+      var originalMatchMedia = window.matchMedia;
+      window.matchMedia = function(query) {
+        if (query && query.indexOf('prefers-color-scheme') !== -1) {
+          var darkMatches = query.indexOf('dark') !== -1;
+          return {
+            matches: darkMatches,
+            media: query,
+            onchange: null,
+            addListener: function() {},
+            removeListener: function() {},
+            addEventListener: function() {},
+            removeEventListener: function() {},
+            dispatchEvent: function() { return false; }
+          };
+        }
+
+        return originalMatchMedia.call(window, query);
+      };
+
+      var root = document.documentElement;
+      if (root) {
+        root.style.colorScheme = 'dark';
+      }
+    } catch (e) {}
+  })(); true;`;
 }
 
 export default function WebviewScreen() {
@@ -24,10 +54,11 @@ export default function WebviewScreen() {
 
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
   const isMaintainance = normalizedMode === "maintainance";
+  const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
-  const [bgColor, setBgColor] = useState(isMaintainance ? "#171717" : systemScheme === "dark" ? "#071018" : "#ffffff");
-  const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(isMaintainance ? "light" : systemScheme === "dark" ? "light" : "dark");
+  const [bgColor, setBgColor] = useState(isMaintainance || isMonitoring ? "#171717" : systemScheme === "dark" ? "#071018" : "#ffffff");
+  const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(isMaintainance || isMonitoring ? "light" : systemScheme === "dark" ? "light" : "dark");
 
   useEffect(() => {
     try {
@@ -49,6 +80,7 @@ export default function WebviewScreen() {
         cacheEnabled={false}
         incognito={true}
         sharedCookiesEnabled={false}
+        domStorageEnabled={true}
         startInLoadingState={true}
         javaScriptEnabled={true}
         originWhitelist={["*"]}
@@ -62,7 +94,7 @@ export default function WebviewScreen() {
           });
           return false;
         }}
-        injectedJavaScriptBeforeContentLoaded={"(function(){window.__rn_injected=true;})();"}
+        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true;})();`}
         injectedJavaScript={`(function() {
           function send(url) {
             try {

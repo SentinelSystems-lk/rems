@@ -14,7 +14,7 @@ function getSourceUri(mode: string | string[] | undefined) {
     return "https://cmms.sentinel.lk/cmms";
   }
 
-  return "https://7s6i6.sentinel.lk/";
+  return "http://localhost:5173/";
 }
 
 function isLoginRoute(url: string | undefined) {

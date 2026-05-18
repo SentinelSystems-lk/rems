@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
-import { AppState, Linking, Pressable, StyleSheet, Text, useColorScheme } from "react-native";
+import { ActivityIndicator, AppState, BackHandler, Linking, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { StatusBar, StatusBarStyle } from "expo-status-bar";
 import { SafeAreaView } from "react-native-safe-area-context";
 import WebView from "react-native-webview";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { usePreventRemove } from "@react-navigation/native";
 
 type Mode = "monitoring" | "maintainance";
 
@@ -13,10 +14,21 @@ function getSourceUri(mode: string | string[] | undefined) {
     return "https://cmms.sentinel.lk/cmms";
   }
 
-  return "http://localhost:5173/";
+  return "https://7s6i6.sentinel.lk/";
 }
 
 function isLoginRoute(url: string | undefined) {
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname === "/login";
+  } catch {
+    return url.includes("/login");
+  }
+}
+
+function shouldShowBackButton(url: string | undefined) {
   if (!url) return false;
 
   try {
@@ -144,22 +156,86 @@ export default function WebviewScreen() {
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
   const [bgColor, setBgColor] = useState(isMaintainance || isMonitoring ? "#171717" : systemScheme === "dark" ? "#071018" : "#ffffff");
   const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(isMaintainance || isMonitoring ? "light" : systemScheme === "dark" ? "light" : "dark");
-  const [canGoBack, setCanGoBack] = useState(false);
-  const [showBackButton, setShowBackButton] = useState(isLoginRoute(sourceUri));
+  const [showBackButton, setShowBackButton] = useState(shouldShowBackButton(sourceUri));
+  const [preventRemove, setPreventRemove] = useState(true);
+  const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const tokenExpiryRef = useRef<NodeJS.Timeout | number | null>(null);
 
+  // Restore saved URL from storage on mount (only if JWT token is still valid)
+  useEffect(() => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const AsyncStorage = require("@react-native-async-storage/async-storage").default;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SecureStore = require("expo-secure-store");
+
+      const storageKey = `webview_url_${normalizedMode}`;
+
+      // First check if token is still valid
+      SecureStore.getItemAsync("jwt_token")
+        .then((token: string | null) => {
+          if (token) {
+            const expiry = getTokenExpiry(token);
+            const isExpired = expiry && new Date(expiry) < new Date();
+
+            if (!isExpired) {
+              // Token is valid, safe to restore URL
+              AsyncStorage.getItem(storageKey)
+                .then((savedUrl: string | null) => {
+                  if (savedUrl) {
+                    console.log("[WebView] Token valid, restored URL from storage:", savedUrl);
+                    setCurrentUrl(savedUrl);
+                  }
+                })
+                .catch((err: any) => console.log("[WebView] Failed to restore URL:", err));
+            } else {
+              // Token expired, clear saved URL to force login
+              console.log("[WebView] Token expired, clearing saved URL");
+              AsyncStorage.removeItem(storageKey).catch(() => {});
+            }
+          } else {
+            // No token, clear saved URL
+            console.log("[WebView] No token found, clearing saved URL");
+            AsyncStorage.removeItem(storageKey).catch(() => {});
+          }
+        })
+        .catch((err: any) => console.log("[WebView] Failed to check token:", err));
+    } catch (err) {
+      console.log("[WebView] Storage check failed:", err);
+    }
+  }, []);
+
+  // Save current URL to storage when it changes
+  useEffect(() => {
+    if (currentUrl && currentUrl !== sourceUri) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const AsyncStorage = require("@react-native-async-storage/async-storage").default;
+        const storageKey = `webview_url_${normalizedMode}`;
+        AsyncStorage.setItem(storageKey, currentUrl).catch((err: any) =>
+          console.log("[WebView] Failed to save URL:", err)
+        );
+      } catch (err) {
+        console.log("[WebView] AsyncStorage not available:", err);
+      }
+    }
+  }, [currentUrl, normalizedMode]);
+
+  usePreventRemove(preventRemove, () => {
+    setPreventRemove(false);
+    setTimeout(() => {
+      router.replace("/");
+    }, 0);
+  });
+
+  function handleBackNavigation() {
+    setPreventRemove(false);
+    router.replace("/");
+    return true;
+  }
+
   function handleBackPress() {
-    if (canGoBack && webviewRef.current && typeof webviewRef.current.goBack === "function") {
-      webviewRef.current.goBack();
-      return;
-    }
-
-    if (router.canGoBack()) {
-      router.back();
-      return;
-    }
-
-    router.push("/");
+    handleBackNavigation();
   }
 
   useEffect(() => {
@@ -170,6 +246,14 @@ export default function WebviewScreen() {
     } catch {
       // Ignore if clearCache is unavailable for this platform/version.
     }
+  }, []);
+
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener("hardwareBackPress", handleBackNavigation);
+
+    return () => {
+      backHandler.remove();
+    };
   }, []);
 
   async function postAuthToken() {
@@ -225,13 +309,21 @@ export default function WebviewScreen() {
       ) : null}
       <WebView
         ref={webviewRef}
-        source={{ uri: sourceUri }}
+        source={{ uri: currentUrl }}
+        containerStyle={styles.webviewContainer}
         style={styles.webview}
+        renderLoading={() => (
+          <View style={styles.loading}>
+            <ActivityIndicator size="large" color="#ffffff" />
+          </View>
+        )}
         onNavigationStateChange={(navState) => {
-          setCanGoBack(Boolean(navState.canGoBack));
-          setShowBackButton(isLoginRoute(navState.url));
+          setShowBackButton(shouldShowBackButton(navState.url));
+          if (navState.url && navState.url !== sourceUri && navState.url !== currentUrl) {
+            setCurrentUrl(navState.url);
+          }
         }}
-        cacheEnabled={false}
+        cacheEnabled={true}
         incognito={true}
         sharedCookiesEnabled={false}
         domStorageEnabled={true}
@@ -366,7 +458,7 @@ export default function WebviewScreen() {
             if (data.type === "route") {
               const path = typeof data.path === "string" ? data.path : "";
               const url = typeof data.url === "string" ? data.url : "";
-              setShowBackButton(path === "/login" || isLoginRoute(url));
+              setShowBackButton(path === "/login" || shouldShowBackButton(url));
               return;
             }
 
@@ -417,5 +509,18 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.2,
   },
-  webview: { flex: 1 },
+  loading: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#000000",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  webviewContainer: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
+  webview: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
 });

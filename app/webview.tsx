@@ -5,8 +5,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import WebView from "react-native-webview";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
+import * as SplashScreen from "expo-splash-screen";
 
 type Mode = "monitoring" | "maintainance";
+
+const HEADER_BG_COLOR = "#0b0b0b";
 
 function getSourceUri(mode: string | string[] | undefined) {
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
@@ -15,6 +18,25 @@ function getSourceUri(mode: string | string[] | undefined) {
   }
 
   return "http://localhost:5173/";
+}
+
+function normalizeUrl(url: string | null | undefined) {
+  if (typeof url !== "string") return "";
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+
+  const embeddedHttpMatch = trimmed.match(/https?:\/{1,2}.*/i);
+  const normalized = embeddedHttpMatch ? embeddedHttpMatch[0] : trimmed;
+
+  if (normalized.startsWith("http:/") && !normalized.startsWith("http://")) {
+    return normalized.replace(/^http:\//, "http://");
+  }
+
+  if (normalized.startsWith("https:/") && !normalized.startsWith("https://")) {
+    return normalized.replace(/^https:\//, "https://");
+  }
+
+  return normalized;
 }
 
 function isLoginRoute(url: string | undefined) {
@@ -146,7 +168,7 @@ export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
   const { mode } = useLocalSearchParams<{ mode?: Mode }>();
-  const sourceUri = getSourceUri(mode);
+  const sourceUri = normalizeUrl(getSourceUri(mode));
   const systemScheme = useColorScheme();
 
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
@@ -154,18 +176,31 @@ export default function WebviewScreen() {
   const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
-  const [bgColor, setBgColor] = useState(isMaintainance || isMonitoring ? "#171717" : systemScheme === "dark" ? "#071018" : "#ffffff");
+  // Default safe area color: use pure black
+  const [bgColor, setBgColor] = useState(HEADER_BG_COLOR);
   const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(isMaintainance || isMonitoring ? "light" : systemScheme === "dark" ? "light" : "dark");
   const [showBackButton, setShowBackButton] = useState(shouldShowBackButton(sourceUri));
   const [preventRemove, setPreventRemove] = useState(true);
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
-  const tokenExpiryRef = useRef<NodeJS.Timeout | number | null>(null);
+  const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Hide splash screen on mount
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
 
   // Restore saved URL from storage on mount (only if JWT token is still valid)
   useEffect(() => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const AsyncStorage = require("@react-native-async-storage/async-storage").default;
+      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+      
+      if (!AsyncStorage) {
+        console.log("[WebView] AsyncStorage not available - skipping URL restore");
+        return;
+      }
+      
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const SecureStore = require("expo-secure-store");
 
@@ -182,9 +217,10 @@ export default function WebviewScreen() {
               // Token is valid, safe to restore URL
               AsyncStorage.getItem(storageKey)
                 .then((savedUrl: string | null) => {
-                  if (savedUrl) {
-                    console.log("[WebView] Token valid, restored URL from storage:", savedUrl);
-                    setCurrentUrl(savedUrl);
+                  const normalizedSavedUrl = normalizeUrl(savedUrl);
+                  if (normalizedSavedUrl) {
+                    console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
+                    setCurrentUrl(normalizedSavedUrl);
                   }
                 })
                 .catch((err: any) => console.log("[WebView] Failed to restore URL:", err));
@@ -210,9 +246,16 @@ export default function WebviewScreen() {
     if (currentUrl && currentUrl !== sourceUri) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const AsyncStorage = require("@react-native-async-storage/async-storage").default;
+        const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+        const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+        
+        if (!AsyncStorage) {
+          console.log("[WebView] AsyncStorage not available - skipping URL save");
+          return;
+        }
+        
         const storageKey = `webview_url_${normalizedMode}`;
-        AsyncStorage.setItem(storageKey, currentUrl).catch((err: any) =>
+        AsyncStorage.setItem(storageKey, normalizeUrl(currentUrl)).catch((err: any) =>
           console.log("[WebView] Failed to save URL:", err)
         );
       } catch (err) {
@@ -302,11 +345,11 @@ export default function WebviewScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
       <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
-      {showBackButton ? (
+      {/* {showBackButton ? (
         <Pressable style={styles.floatingBackButton} onPress={handleBackPress}>
           <Text style={styles.floatingBackText}>Back</Text>
         </Pressable>
-      ) : null}
+      ) : null} */}
       <WebView
         ref={webviewRef}
         source={{ uri: currentUrl }}
@@ -318,9 +361,10 @@ export default function WebviewScreen() {
           </View>
         )}
         onNavigationStateChange={(navState) => {
-          setShowBackButton(shouldShowBackButton(navState.url));
-          if (navState.url && navState.url !== sourceUri && navState.url !== currentUrl) {
-            setCurrentUrl(navState.url);
+          const nextUrl = normalizeUrl(navState.url);
+          setShowBackButton(shouldShowBackButton(nextUrl));
+          if (nextUrl && nextUrl !== sourceUri && nextUrl !== currentUrl) {
+            setCurrentUrl(nextUrl);
           }
         }}
         cacheEnabled={true}
@@ -331,7 +375,8 @@ export default function WebviewScreen() {
         javaScriptEnabled={true}
         originWhitelist={["*"]}
         onShouldStartLoadWithRequest={(request) => {
-          const requestedUrl: string = request.url || "";
+          const requestedUrl = normalizeUrl(request.url);
+          if (!requestedUrl) return false;
           if (requestedUrl.startsWith("http://") || requestedUrl.startsWith("https://")) {
             return true;
           }
@@ -445,7 +490,7 @@ export default function WebviewScreen() {
               if (isMaintainance) return;
               setTimeout(() => {
                 if (data.scheme === "dark") {
-                  setBgColor("#000000f5");
+                  setBgColor(HEADER_BG_COLOR);
                   setStatusBarStyle("light");
                 } else {
                   setBgColor("#ffffff");
@@ -474,7 +519,7 @@ export default function WebviewScreen() {
               return;
             }
 
-            const openedUrl = data?.url;
+            const openedUrl = normalizeUrl(data?.url);
             if (openedUrl) {
               Linking.canOpenURL(openedUrl).then((supported) => {
                 if (supported) Linking.openURL(openedUrl);
@@ -490,7 +535,7 @@ export default function WebviewScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#071018", padding: 0, margin: 0 },
+  safe: { flex: 1, backgroundColor: HEADER_BG_COLOR, padding: 0, margin: 0 },
   floatingBackButton: {
     position: "absolute",
     top: 50,
@@ -511,16 +556,16 @@ const styles = StyleSheet.create({
   },
   loading: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#000000",
+    backgroundColor: HEADER_BG_COLOR,
     alignItems: "center",
     justifyContent: "center",
   },
   webviewContainer: {
     flex: 1,
-    backgroundColor: "#000000",
+    backgroundColor: HEADER_BG_COLOR,
   },
   webview: {
     flex: 1,
-    backgroundColor: "#000000",
+    backgroundColor: HEADER_BG_COLOR,
   },
 });

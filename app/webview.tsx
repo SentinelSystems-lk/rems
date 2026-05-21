@@ -17,7 +17,7 @@ function getSourceUri(mode: string | string[] | undefined) {
     return "https://cmms.sentinel.lk/cmms";
   }
 
-  return "http://localhost:5173/";
+  return "https://7s6i6.sentinel.lk/";
 }
 
 function normalizeUrl(url: string | null | undefined) {

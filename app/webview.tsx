@@ -1,12 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, BackHandler, Linking, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
+import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { StatusBar, StatusBarStyle } from "expo-status-bar";
+import Constants from "expo-constants";
 import { SafeAreaView } from "react-native-safe-area-context";
 import WebView from "react-native-webview";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
+import * as SplashScreen from "expo-splash-screen";
+import { getBackendUrl, FORCE_PUSH_SYNC } from "./config";
 
 type Mode = "monitoring" | "maintainance";
+
+const HEADER_BG_COLOR = "#0b0b0b";
 
 function getSourceUri(mode: string | string[] | undefined) {
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
@@ -14,7 +19,26 @@ function getSourceUri(mode: string | string[] | undefined) {
     return "https://cmms.sentinel.lk/cmms";
   }
 
-  return "http://localhost:5173/";
+  return "https://7s6i6.sentinel.lk/";
+}
+
+function normalizeUrl(url: string | null | undefined) {
+  if (typeof url !== "string") return "";
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+
+  const embeddedHttpMatch = trimmed.match(/https?:\/{1,2}.*/i);
+  const normalized = embeddedHttpMatch ? embeddedHttpMatch[0] : trimmed;
+
+  if (normalized.startsWith("http:/") && !normalized.startsWith("http://")) {
+    return normalized.replace(/^http:\//, "http://");
+  }
+
+  if (normalized.startsWith("https:/") && !normalized.startsWith("https://")) {
+    return normalized.replace(/^https:\//, "https://");
+  }
+
+  return normalized;
 }
 
 function isLoginRoute(url: string | undefined) {
@@ -142,37 +166,68 @@ function getTokenExpiry(token: string) {
   return (payload.exp as number) * 1000; // convert seconds to ms
 }
 
+function addCacheBuster(url: string, version: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("__wv_version", version);
+    return parsed.toString();
+  } catch {
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}__wv_version=${encodeURIComponent(version)}`;
+  }
+}
+
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
   const { mode } = useLocalSearchParams<{ mode?: Mode }>();
-  const sourceUri = getSourceUri(mode);
+  const sourceUri = normalizeUrl(getSourceUri(mode));
   const systemScheme = useColorScheme();
 
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
   const isMaintainance = normalizedMode === "maintainance";
   const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
+  const [initialUrl, setInitialUrl] = useState(sourceUri);
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
-  const [bgColor, setBgColor] = useState(isMaintainance || isMonitoring ? "#171717" : systemScheme === "dark" ? "#071018" : "#ffffff");
+  // Default safe area color: use pure black
+  const [bgColor, setBgColor] = useState(HEADER_BG_COLOR);
   const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(isMaintainance || isMonitoring ? "light" : systemScheme === "dark" ? "light" : "dark");
   const [showBackButton, setShowBackButton] = useState(shouldShowBackButton(sourceUri));
   const [preventRemove, setPreventRemove] = useState(true);
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
-  const tokenExpiryRef = useRef<NodeJS.Timeout | number | null>(null);
+  const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const versionProbeRef = useRef<Promise<void> | null>(null);
+
+  useEffect(() => {
+    setInitialUrl(sourceUri);
+    setCurrentUrl(sourceUri);
+  }, [sourceUri]);
+
+  // Hide splash screen on mount
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
 
   // Restore saved URL from storage on mount (only if JWT token is still valid)
   useEffect(() => {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const AsyncStorage = require("@react-native-async-storage/async-storage").default;
+      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+      
+      if (!AsyncStorage) {
+        console.log("[WebView] AsyncStorage not available - skipping URL restore");
+        return;
+      }
+      
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const SecureStore = require("expo-secure-store");
 
       const storageKey = `webview_url_${normalizedMode}`;
 
       // First check if token is still valid
-      SecureStore.getItemAsync("jwt_token")
+      SecureStore.getItemAsync("jwt")
         .then((token: string | null) => {
           if (token) {
             const expiry = getTokenExpiry(token);
@@ -182,9 +237,12 @@ export default function WebviewScreen() {
               // Token is valid, safe to restore URL
               AsyncStorage.getItem(storageKey)
                 .then((savedUrl: string | null) => {
-                  if (savedUrl) {
-                    console.log("[WebView] Token valid, restored URL from storage:", savedUrl);
-                    setCurrentUrl(savedUrl);
+                  const normalizedSavedUrl = normalizeUrl(savedUrl);
+                  if (normalizedSavedUrl) {
+                    console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
+                    setInitialUrl(normalizedSavedUrl);
+                    setCurrentUrl(normalizedSavedUrl);
+                    void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
                   }
                 })
                 .catch((err: any) => console.log("[WebView] Failed to restore URL:", err));
@@ -205,14 +263,73 @@ export default function WebviewScreen() {
     }
   }, []);
 
+  async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
+    if (versionProbeRef.current) {
+      return versionProbeRef.current;
+    }
+
+    versionProbeRef.current = (async () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+        const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+
+        if (!AsyncStorage) return;
+
+        const versionKey = `webview_remote_version_${normalizedMode}`;
+        const response = await fetch(sourceUri, {
+          method: "HEAD",
+          cache: "no-store",
+        });
+
+        const fingerprint = [
+          response.headers.get("etag"),
+          response.headers.get("last-modified"),
+          response.headers.get("content-length"),
+        ]
+          .filter(Boolean)
+          .join("|");
+
+        if (!fingerprint) {
+          return;
+        }
+
+        const previousFingerprint = await AsyncStorage.getItem(versionKey);
+        if (previousFingerprint && previousFingerprint !== fingerprint) {
+          const refreshUrl = addCacheBuster(targetUrl, fingerprint);
+          console.log("[WebView] Website changed, reloading with cache buster:", refreshUrl);
+          setInitialUrl(refreshUrl);
+          setCurrentUrl(refreshUrl);
+        }
+
+        if (previousFingerprint !== fingerprint) {
+          await AsyncStorage.setItem(versionKey, fingerprint);
+        }
+      } catch (err) {
+        console.log("[WebView] Version probe skipped:", err);
+      } finally {
+        versionProbeRef.current = null;
+      }
+    })();
+
+    return versionProbeRef.current;
+  }
+
   // Save current URL to storage when it changes
   useEffect(() => {
     if (currentUrl && currentUrl !== sourceUri) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const AsyncStorage = require("@react-native-async-storage/async-storage").default;
+        const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+        const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+        
+        if (!AsyncStorage) {
+          console.log("[WebView] AsyncStorage not available - skipping URL save");
+          return;
+        }
+        
         const storageKey = `webview_url_${normalizedMode}`;
-        AsyncStorage.setItem(storageKey, currentUrl).catch((err: any) =>
+        AsyncStorage.setItem(storageKey, normalizeUrl(currentUrl)).catch((err: any) =>
           console.log("[WebView] Failed to save URL:", err)
         );
       } catch (err) {
@@ -237,16 +354,6 @@ export default function WebviewScreen() {
   function handleBackPress() {
     handleBackNavigation();
   }
-
-  useEffect(() => {
-    try {
-      if (webviewRef.current && typeof webviewRef.current.clearCache === "function") {
-        webviewRef.current.clearCache(true);
-      }
-    } catch {
-      // Ignore if clearCache is unavailable for this platform/version.
-    }
-  }, []);
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", handleBackNavigation);
@@ -286,11 +393,128 @@ export default function WebviewScreen() {
     }
   }
 
+  async function syncExpoPushTokenToBackend(authToken?: string | null) {
+    try {
+      // Runtime requires keep the bundle stable even if the package is temporarily missing.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Notifications = require("expo-notifications");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Device = require("expo-device");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SecureStore = require("expo-secure-store");
+
+      if (!Device?.isDevice) {
+        console.log("[Push] Physical device required for Expo push tokens");
+        return;
+      }
+
+      const storedAuthToken = authToken ?? (await SecureStore.getItemAsync("jwt"));
+      if (!storedAuthToken) {
+        console.log("[Push] No auth token available yet; skipping push-token sync");
+        return;
+      }
+
+      // Log limited auth token info for debugging (don't log full token in production)
+      try {
+        const short = typeof storedAuthToken === 'string' ? storedAuthToken.substring(0, 20) + '...' : String(storedAuthToken);
+        console.log("[Push] Using auth token:", short);
+        const tokenInfo = decodeJwt(storedAuthToken as string);
+        if (tokenInfo) {
+          console.log("[Push] Auth token payload:", { sub: tokenInfo.sub, iss: tokenInfo.iss, exp: tokenInfo.exp });
+        }
+        if (typeof __DEV__ !== 'undefined' && __DEV__) {
+          console.log("[Push] Full auth token (dev only):", storedAuthToken);
+        }
+      } catch (e) {
+        console.log("[Push] Failed to decode auth token for debug:", e);
+      }
+
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== "granted") {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== "granted") {
+        console.log("[Push] Notification permission denied; skipping push-token sync");
+        return;
+      }
+
+      const projectId =
+        Constants.easConfig?.projectId ??
+        Constants.expoConfig?.extra?.eas?.projectId;
+
+      const pushTokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
+      const expoPushToken = pushTokenResponse?.data;
+
+      if (!expoPushToken) {
+        console.log("[Push] Failed to obtain Expo push token");
+        return;
+      }
+
+      console.log("[Push] Expo push token:", expoPushToken);
+
+      const storageKey = `expo_push_token_sent_${normalizedMode}`;
+      const ownerKey = `expo_push_token_owner_${normalizedMode}`;
+      const lastSentToken = await AsyncStorage.getItem(storageKey);
+      const lastOwner = await AsyncStorage.getItem(ownerKey);
+
+      let currentOwner: string | null = null;
+      try {
+        const info = decodeJwt(storedAuthToken as string) as any;
+        currentOwner = info?.sub ? String(info.sub) : null;
+      } catch {}
+
+      // Always send the token to the backend so the server can decide how to handle duplicates
+      console.log("[Push] Forcing push-token sync to backend", { lastSentToken, lastOwner, currentOwner });
+
+      const endpoint = getBackendUrl("/api/push-tokens");
+      console.log("[Push] Sending push-token to:", endpoint);
+      console.log("[Push] Payload preview:", { expoPushToken: expoPushToken ? expoPushToken.substring(0, 16) + '...' : null, platform: Platform.OS, mode: normalizedMode });
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${storedAuthToken}`,
+        },
+        body: JSON.stringify({
+          expoPushToken,
+          platform: Platform.OS,
+          mode: normalizedMode,
+        }),
+      });
+
+      if (!response.ok) {
+        const responseText = await response.text().catch(() => "");
+        console.log("[Push] Backend response:", { status: response.status, body: responseText });
+        throw new Error(`Push token sync failed with ${response.status}: ${responseText}`);
+      }
+      await AsyncStorage.setItem(storageKey, expoPushToken);
+      if (currentOwner) {
+        await AsyncStorage.setItem(ownerKey, currentOwner).catch(() => {});
+      }
+      console.log("[Push] Expo push token synced to backend");
+    } catch (err) {
+      console.log("[Push] Error syncing Expo push token:", err);
+    }
+  }
+
   useEffect(() => {
     // Post stored token when screen mounts and when app returns to foreground
     postAuthToken();
+    syncExpoPushTokenToBackend();
+    void maybeReloadIfWebsiteChanged();
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") postAuthToken();
+      if (state === "active") {
+        postAuthToken();
+        syncExpoPushTokenToBackend();
+        void maybeReloadIfWebsiteChanged();
+      }
     });
 
     return () => {
@@ -302,36 +526,33 @@ export default function WebviewScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
       <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
-      {showBackButton ? (
+      {/* {showBackButton ? (
         <Pressable style={styles.floatingBackButton} onPress={handleBackPress}>
           <Text style={styles.floatingBackText}>Back</Text>
         </Pressable>
-      ) : null}
+      ) : null} */}
       <WebView
         ref={webviewRef}
-        source={{ uri: currentUrl }}
+        source={{ uri: initialUrl }}
         containerStyle={styles.webviewContainer}
         style={styles.webview}
-        renderLoading={() => (
-          <View style={styles.loading}>
-            <ActivityIndicator size="large" color="#ffffff" />
-          </View>
-        )}
         onNavigationStateChange={(navState) => {
-          setShowBackButton(shouldShowBackButton(navState.url));
-          if (navState.url && navState.url !== sourceUri && navState.url !== currentUrl) {
-            setCurrentUrl(navState.url);
+          const nextUrl = normalizeUrl(navState.url);
+          setShowBackButton(shouldShowBackButton(nextUrl));
+          if (nextUrl && nextUrl !== sourceUri && nextUrl !== currentUrl) {
+            setCurrentUrl(nextUrl);
           }
         }}
         cacheEnabled={true}
-        incognito={true}
-        sharedCookiesEnabled={false}
+        incognito={false}
+        sharedCookiesEnabled={true}
+        thirdPartyCookiesEnabled={true}
         domStorageEnabled={true}
-        startInLoadingState={true}
         javaScriptEnabled={true}
         originWhitelist={["*"]}
         onShouldStartLoadWithRequest={(request) => {
-          const requestedUrl: string = request.url || "";
+          const requestedUrl = normalizeUrl(request.url);
+          if (!requestedUrl) return false;
           if (requestedUrl.startsWith("http://") || requestedUrl.startsWith("https://")) {
             return true;
           }
@@ -340,7 +561,7 @@ export default function WebviewScreen() {
           });
           return false;
         }}
-        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }})();`}
+        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ /* also set cookie for servers that rely on cookies */ document.cookie = 'jwt=' + encodeURIComponent(d.token) + '; path=/; SameSite=None; Secure'; console.log('[RN-Auth] Cookie set'); }catch(e){ console.error('[RN-Auth] Failed to set cookie:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }})();`}
         injectedJavaScript={`(function() {
           function send(url) {
             try {
@@ -431,6 +652,7 @@ export default function WebviewScreen() {
                 const ss = require("expo-secure-store");
                 ss.setItemAsync("jwt", data.token).then(() => {
                   console.log("[WebView] ✅ Token SAVED to SecureStore successfully");
+                  syncExpoPushTokenToBackend(data.token);
                 }).catch((err: any) => {
                   console.log("[WebView] ❌ Failed saving token to SecureStore:", err);
                 });
@@ -445,7 +667,7 @@ export default function WebviewScreen() {
               if (isMaintainance) return;
               setTimeout(() => {
                 if (data.scheme === "dark") {
-                  setBgColor("#000000f5");
+                  setBgColor(HEADER_BG_COLOR);
                   setStatusBarStyle("light");
                 } else {
                   setBgColor("#ffffff");
@@ -474,7 +696,7 @@ export default function WebviewScreen() {
               return;
             }
 
-            const openedUrl = data?.url;
+            const openedUrl = normalizeUrl(data?.url);
             if (openedUrl) {
               Linking.canOpenURL(openedUrl).then((supported) => {
                 if (supported) Linking.openURL(openedUrl);
@@ -490,7 +712,7 @@ export default function WebviewScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#071018", padding: 0, margin: 0 },
+  safe: { flex: 1, backgroundColor: HEADER_BG_COLOR, padding: 0, margin: 0 },
   floatingBackButton: {
     position: "absolute",
     top: 50,
@@ -511,16 +733,16 @@ const styles = StyleSheet.create({
   },
   loading: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#000000",
+    backgroundColor: HEADER_BG_COLOR,
     alignItems: "center",
     justifyContent: "center",
   },
   webviewContainer: {
     flex: 1,
-    backgroundColor: "#000000",
+    backgroundColor: HEADER_BG_COLOR,
   },
   webview: {
     flex: 1,
-    backgroundColor: "#000000",
+    backgroundColor: HEADER_BG_COLOR,
   },
 });

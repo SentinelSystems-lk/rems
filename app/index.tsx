@@ -1,274 +1,232 @@
-import React from "react";
-import { Image, Pressable, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Image, StyleSheet, Text, View, Animated, Easing } from "react-native";
 import { useRouter } from "expo-router";
+import * as SplashScreen from "expo-splash-screen";
+import { StatusBar } from "expo-status-bar";
+
+function getSourceUri(mode: string) {
+  return mode === "maintainance" ? "https://cmms.sentinel.lk/cmms" : "https://7s6i6.sentinel.lk/";
+}
+
+function getVersionFileUrl(mode: string) {
+  const sourceUri = getSourceUri(mode);
+  try {
+    return new URL("version.json", sourceUri.endsWith("/") ? sourceUri : `${sourceUri}/`).toString();
+  } catch {
+    return `${sourceUri}version.json`;
+  }
+}
+
+async function readVersionFile(versionUrl: string) {
+  try {
+    const response = await fetch(versionUrl, { cache: "no-store" });
+    if (!response.ok) return null;
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json().catch(() => null);
+      if (data && typeof data.version === "string") return data.version.trim();
+    }
+    const text = (await response.text()).trim();
+    if (!text) return null;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed.version === "string") return parsed.version.trim();
+    } catch {}
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+async function loadStorage() {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+  return AsyncStorageModule?.default || AsyncStorageModule;
+}
 
 export default function Home() {
   const router = useRouter();
+  const [ready, setReady] = useState(false);
+
+  // Animation refs for splash polish
+  const shellOpacity = useRef(new Animated.Value(0)).current;
+  const logoScale = useRef(new Animated.Value(0.98)).current;
+  const loaderTranslate = useRef(new Animated.Value(10)).current;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function bootstrap() {
+      const mode = "monitoring";
+      const versionKey = `webview_site_version_${mode}`;
+      const versionUrl = getVersionFileUrl(mode);
+
+      
+
+      try {
+        const AsyncStorage = await loadStorage();
+        const siteVersion = await readVersionFile(versionUrl);
+
+        if (siteVersion) {
+          const previousVersion = await AsyncStorage.getItem(versionKey);
+          if (previousVersion !== siteVersion) {
+            await AsyncStorage.setItem(versionKey, siteVersion);
+          }
+        }
+
+        if (!cancelled) {
+          router.replace({ pathname: "/webview", params: { mode, ...(siteVersion ? { siteVersion } : {}) } });
+          setReady(true);
+          await SplashScreen.hideAsync().catch(() => {});
+        }
+      } catch (err) {
+        if (!cancelled) {
+          router.replace({ pathname: "/webview", params: { mode } });
+          setReady(true);
+          await SplashScreen.hideAsync().catch(() => {});
+        }
+      }
+    }
+
+    void bootstrap();
+
+    return () => { cancelled = true; };
+  }, [router]);
+
+  useEffect(() => {
+    // run splash animations once
+    Animated.sequence([
+      Animated.timing(shellOpacity, { toValue: 1, duration: 420, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.parallel([
+        Animated.spring(logoScale, { toValue: 1, friction: 7, tension: 120, useNativeDriver: true }),
+        Animated.timing(loaderTranslate, { toValue: 0, duration: 420, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+      ]),
+    ]).start();
+
+    // gentle pulsing loop for logo
+    const pulse = Animated.loop(Animated.sequence([
+      Animated.timing(logoScale, { toValue: 1.03, duration: 1200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(logoScale, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    pulse.start();
+
+    return () => pulse.stop();
+  }, [shellOpacity, logoScale, loaderTranslate]);
+
+  if (ready) return null;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
-      <View style={styles.backgroundGlowTop} />
-      <View style={styles.backgroundGlowLeft} />
-      <View style={styles.backgroundGlowBottom} />
+    <View style={styles.loading}>
+      <StatusBar style="light" backgroundColor="#000000" />
+      <View style={styles.glowTop} />
+      <View style={styles.glowBottom} />
 
-      <View style={styles.container}>
-        <View style={styles.headerRow}>
-          <View style={styles.brandMark}>
-            <Image source={require("../assets/images/Logo/logo.png")} style={styles.logo} resizeMode="contain" />
-          </View>
-          {/* <View style={styles.statusPill}>
-            <View style={styles.statusDot} />
-            <Text style={styles.statusText}>Active</Text>
-          </View> */}
-        </View>
+      <Animated.View style={[styles.brandShell, { opacity: shellOpacity, transform: [{ translateY: shellOpacity.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}>
+        <Animated.View style={[styles.logoFrame, { transform: [{ scale: logoScale }] }]}>
+          <Image
+            source={require("../assets/images/Logo/logo.png")}
+            resizeMode="contain"
+            style={styles.logo}
+          />
+        </Animated.View>
 
-        <View style={styles.heroCard}>
-          <Text style={styles.kicker}>Power Operations</Text>
-          <Text style={styles.title}>Select a module</Text>
-          <Text style={styles.subtitle}>
-            Open the monitoring dashboard or switch to maintenance for system controls.
-          </Text>
+        <Text style={styles.title}>InsightsPV</Text>
+        <Text style={styles.subtitle}>Renewable Energy Management System</Text>
 
-          <View style={styles.moduleGrid}>
-            <Pressable
-              style={({ pressed }) => [styles.moduleCard, styles.monitoringCard, pressed && styles.cardPressed]}
-              onPress={() => router.push({ pathname: "/webview", params: { mode: "monitoring" } })}
-            >
-              <View style={[styles.iconBadge, styles.monitoringBadge]}>
-                <Text style={styles.iconText}>M</Text>
-              </View>
-              <Text style={styles.moduleLabel}>Monitoring</Text>
-              <Text style={styles.moduleCopy}>
-                Live production overview, KPIs, alarms, and site status.
-              </Text>
-              <View style={styles.moduleCtaRow}>
-                <Text style={styles.moduleCta}>Open dashboard</Text>
-                <Text style={styles.moduleArrow}>›</Text>
-              </View>
-            </Pressable>
-
-            <Pressable
-              style={({ pressed }) => [styles.moduleCard, styles.maintenanceCard, pressed && styles.cardPressed]}
-              onPress={() => router.push({ pathname: "/webview", params: { mode: "maintainance" } })}
-            >
-              <View style={[styles.iconBadge, styles.maintenanceBadge]}>
-                <Text style={styles.iconText}>S</Text>
-              </View>
-              <Text style={styles.moduleLabel}>Maintenance</Text>
-              <Text style={styles.moduleCopy}>
-                Service tools, system access, and maintenance workflows.
-              </Text>
-              <View style={styles.moduleCtaRow}>
-                <Text style={styles.moduleCta}>Open console</Text>
-                <Text style={styles.moduleArrow}>›</Text>
-              </View>
-            </Pressable>
-          </View>
-        </View>
-      </View>
-    </SafeAreaView>
+        <Animated.View style={[styles.loaderRow, { transform: [{ translateY: loaderTranslate }] }]}>
+          <ActivityIndicator size="small" color="#4ef27f" />
+          <Text style={styles.loaderText}>Preparing secure session</Text>
+        </Animated.View>
+      </Animated.View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: {
+  loading: {
     flex: 1,
-    backgroundColor: "#040608",
-    padding: 0,
-    margin: 0,
-  },
-  backgroundGlowTop: {
-    position: "absolute",
-    top: -120,
-    left: -90,
-    width: 260,
-    height: 260,
-    borderRadius: 260,
-    backgroundColor: "rgba(20, 185, 129, 0.16)",
-  },
-  backgroundGlowLeft: {
-    position: "absolute",
-    top: 120,
-    left: -110,
-    width: 220,
-    height: 220,
-    borderRadius: 220,
-    backgroundColor: "rgba(58, 122, 255, 0.14)",
-  },
-  backgroundGlowBottom: {
-    position: "absolute",
-    right: -120,
-    bottom: -120,
-    width: 280,
-    height: 280,
-    borderRadius: 280,
-    backgroundColor: "rgba(14, 185, 129, 0.12)",
-  },
-  container: {
-    flex: 1,
-    paddingHorizontal: 18,
-    paddingTop: 10,
-    paddingBottom: 18,
-    gap: 16,
-  },
-  headerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 6,
-  },
-  brandMark: {
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-  },
-  logo: {
-    width: 96,
-    height: 34,
-  },
-  statusPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderWidth: 1,
-    borderColor: "rgba(37, 197, 124, 0.24)",
-    backgroundColor: "rgba(7, 38, 28, 0.82)",
-  },
-  statusDot: {
-    width: 9,
-    height: 9,
-    borderRadius: 9,
-    backgroundColor: "#2dd67b",
-    shadowColor: "#2dd67b",
-    shadowOpacity: 0.9,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  statusText: {
-    color: "#8de9b8",
-    fontSize: 13,
-    fontWeight: "700",
-    letterSpacing: 0.3,
-  },
-  heroCard: {
-    flex: 1,
-    borderRadius: 32,
-    padding: 20,
-    backgroundColor: "rgba(8, 10, 14, 0.82)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.07)",
-    shadowColor: "#000",
-    shadowOpacity: 0.4,
-    shadowRadius: 30,
-    shadowOffset: { width: 0, height: 20 },
-    justifyContent: "space-between",
-  },
-  kicker: {
-    color: "#8d95a3",
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 2,
-    textTransform: "uppercase",
-    marginBottom: 8,
-  },
-  title: {
-    color: "#eef4fb",
-    fontSize: 31,
-    lineHeight: 36,
-    fontWeight: "800",
-    letterSpacing: -0.4,
-  },
-  subtitle: {
-    color: "#97a4b5",
-    fontSize: 15,
-    lineHeight: 22,
-    marginTop: 10,
-    maxWidth: 320,
-  },
-  moduleGrid: {
-    gap: 14,
-  },
-  moduleCard: {
-    width: "100%",
-    minHeight: 148,
-    borderRadius: 24,
-    padding: 18,
-    backgroundColor: "rgba(11, 15, 22, 0.95)",
-    borderWidth: 1,
-    justifyContent: "space-between",
-    overflow: "hidden",
-  },
-  monitoringCard: {
-    borderColor: "rgba(70, 132, 255, 0.34)",
-    shadowColor: "#4b83ff",
-    shadowOpacity: 0.18,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 10 },
-  },
-  maintenanceCard: {
-    borderColor: "rgba(37, 197, 124, 0.28)",
-    shadowColor: "#24c57c",
-    shadowOpacity: 0.16,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 10 },
-  },
-  cardPressed: {
-    transform: [{ scale: 0.98 }],
-    opacity: 0.92,
-  },
-  iconBadge: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
+    backgroundColor: "#000000",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 14,
+    overflow: "hidden",
+  },
+  glowTop: {
+    position: "absolute",
+    top: -140,
+    left: -90,
+    width: 300,
+    height: 300,
+    borderRadius: 300,
+    backgroundColor: "rgba(78, 242, 127, 0.12)",
+    opacity: 0.85,
+  },
+  glowBottom: {
+    position: "absolute",
+    right: -120,
+    bottom: -130,
+    width: 320,
+    height: 320,
+    borderRadius: 320,
+    backgroundColor: "rgba(82, 77, 220, 0.14)",
+    opacity: 0.9,
+  },
+  brandShell: {
+    width: "86%",
+    maxWidth: 460,
+    alignItems: "center",
+    paddingVertical: 34,
+    paddingHorizontal: 26,
+    borderRadius: 28,
+    backgroundColor: "rgba(10, 12, 14, 0.75)",
     borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.04)",
   },
-  monitoringBadge: {
-    backgroundColor: "rgba(48, 96, 255, 0.16)",
-    borderColor: "rgba(86, 140, 255, 0.28)",
+  logoFrame: {
+    width: 156,
+    height: 156,
+    borderRadius: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.02)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
+    marginBottom: 22,
   },
-  maintenanceBadge: {
-    backgroundColor: "rgba(18, 145, 95, 0.16)",
-    borderColor: "rgba(40, 197, 124, 0.26)",
+  logo: {
+    width: 120,
+    height: 120,
   },
-  iconText: {
-    color: "#eaf3ff",
-    fontSize: 16,
-    fontWeight: "800",
+  title: {
+    color: "#f7fbff",
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+    textAlign: "center",
   },
-  moduleLabel: {
-    color: "#f0f4fa",
-    fontSize: 22,
-    fontWeight: "800",
-    letterSpacing: -0.2,
+  subtitle: {
+    marginTop: 6,
+    color: "rgba(228, 233, 241, 0.7)",
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: "center",
+    maxWidth: 300,
   },
-  moduleCopy: {
-    color: "#95a1b3",
-    fontSize: 14,
-    lineHeight: 21,
-    marginTop: 8,
-    maxWidth: 280,
-  },
-  moduleCtaRow: {
-    marginTop: 14,
+  loaderRow: {
+    marginTop: 22,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.05)",
   },
-  moduleCta: {
-    color: "#dbe6f4",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  moduleArrow: {
-    color: "#8ea3be",
-    fontSize: 28,
-    lineHeight: 28,
-    marginTop: -4,
+  loaderText: {
+    color: "rgba(244, 247, 251, 0.9)",
+    fontSize: 13,
+    fontWeight: "500",
   },
 });

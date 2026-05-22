@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import { Stack } from "expo-router";
 import * as Notifications from "expo-notifications";
+import * as SplashScreen from "expo-splash-screen";
+
+// Keep native splash visible until app decides navigation (version check)
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -24,8 +28,9 @@ export default function RootLayout() {
   return (
     <Stack 
       screenOptions={{ headerShown: false }} 
-      initialRouteName="webview"
+      initialRouteName="index"
     >
+      <Stack.Screen name="index" />
       <Stack.Screen 
         name="webview" 
         initialParams={{ mode: "monitoring" }}

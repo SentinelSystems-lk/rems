@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
+import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { StatusBar, StatusBarStyle } from "expo-status-bar";
 import Constants from "expo-constants";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -166,6 +166,17 @@ function getTokenExpiry(token: string) {
   return (payload.exp as number) * 1000; // convert seconds to ms
 }
 
+function addCacheBuster(url: string, version: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("__wv_version", version);
+    return parsed.toString();
+  } catch {
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}__wv_version=${encodeURIComponent(version)}`;
+  }
+}
+
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
@@ -176,6 +187,7 @@ export default function WebviewScreen() {
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
   const isMaintainance = normalizedMode === "maintainance";
   const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
+  const [initialUrl, setInitialUrl] = useState(sourceUri);
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
   // Default safe area color: use pure black
@@ -185,6 +197,12 @@ export default function WebviewScreen() {
   const [preventRemove, setPreventRemove] = useState(true);
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const versionProbeRef = useRef<Promise<void> | null>(null);
+
+  useEffect(() => {
+    setInitialUrl(sourceUri);
+    setCurrentUrl(sourceUri);
+  }, [sourceUri]);
 
   // Hide splash screen on mount
   useEffect(() => {
@@ -222,7 +240,9 @@ export default function WebviewScreen() {
                   const normalizedSavedUrl = normalizeUrl(savedUrl);
                   if (normalizedSavedUrl) {
                     console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
+                    setInitialUrl(normalizedSavedUrl);
                     setCurrentUrl(normalizedSavedUrl);
+                    void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
                   }
                 })
                 .catch((err: any) => console.log("[WebView] Failed to restore URL:", err));
@@ -242,6 +262,58 @@ export default function WebviewScreen() {
       console.log("[WebView] Storage check failed:", err);
     }
   }, []);
+
+  async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
+    if (versionProbeRef.current) {
+      return versionProbeRef.current;
+    }
+
+    versionProbeRef.current = (async () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+        const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+
+        if (!AsyncStorage) return;
+
+        const versionKey = `webview_remote_version_${normalizedMode}`;
+        const response = await fetch(sourceUri, {
+          method: "HEAD",
+          cache: "no-store",
+        });
+
+        const fingerprint = [
+          response.headers.get("etag"),
+          response.headers.get("last-modified"),
+          response.headers.get("content-length"),
+        ]
+          .filter(Boolean)
+          .join("|");
+
+        if (!fingerprint) {
+          return;
+        }
+
+        const previousFingerprint = await AsyncStorage.getItem(versionKey);
+        if (previousFingerprint && previousFingerprint !== fingerprint) {
+          const refreshUrl = addCacheBuster(targetUrl, fingerprint);
+          console.log("[WebView] Website changed, reloading with cache buster:", refreshUrl);
+          setInitialUrl(refreshUrl);
+          setCurrentUrl(refreshUrl);
+        }
+
+        if (previousFingerprint !== fingerprint) {
+          await AsyncStorage.setItem(versionKey, fingerprint);
+        }
+      } catch (err) {
+        console.log("[WebView] Version probe skipped:", err);
+      } finally {
+        versionProbeRef.current = null;
+      }
+    })();
+
+    return versionProbeRef.current;
+  }
 
   // Save current URL to storage when it changes
   useEffect(() => {
@@ -282,16 +354,6 @@ export default function WebviewScreen() {
   function handleBackPress() {
     handleBackNavigation();
   }
-
-  useEffect(() => {
-    try {
-      if (webviewRef.current && typeof webviewRef.current.clearCache === "function") {
-        webviewRef.current.clearCache(true);
-      }
-    } catch {
-      // Ignore if clearCache is unavailable for this platform/version.
-    }
-  }, []);
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", handleBackNavigation);
@@ -446,10 +508,12 @@ export default function WebviewScreen() {
     // Post stored token when screen mounts and when app returns to foreground
     postAuthToken();
     syncExpoPushTokenToBackend();
+    void maybeReloadIfWebsiteChanged();
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") {
         postAuthToken();
         syncExpoPushTokenToBackend();
+        void maybeReloadIfWebsiteChanged();
       }
     });
 
@@ -469,14 +533,9 @@ export default function WebviewScreen() {
       ) : null} */}
       <WebView
         ref={webviewRef}
-        source={{ uri: currentUrl }}
+        source={{ uri: initialUrl }}
         containerStyle={styles.webviewContainer}
         style={styles.webview}
-        renderLoading={() => (
-          <View style={styles.loading}>
-            <ActivityIndicator size="large" color="#ffffff" />
-          </View>
-        )}
         onNavigationStateChange={(navState) => {
           const nextUrl = normalizeUrl(navState.url);
           setShowBackButton(shouldShowBackButton(nextUrl));
@@ -485,10 +544,9 @@ export default function WebviewScreen() {
           }
         }}
         cacheEnabled={true}
-        incognito={true}
+        incognito={false}
         sharedCookiesEnabled={false}
         domStorageEnabled={true}
-        startInLoadingState={true}
         javaScriptEnabled={true}
         originWhitelist={["*"]}
         onShouldStartLoadWithRequest={(request) => {

@@ -2,7 +2,7 @@
   "expo": {
     "name": "InsightsPV",
     "slug": "InsightsPV",
-    "version": "2.0.2",
+    "version": "2.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/Logo/insightsPV-Logo-IOS.png",
     "scheme": "InsightsPV",

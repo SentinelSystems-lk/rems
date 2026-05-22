@@ -25,6 +25,7 @@
         "foregroundImage": "./assets/images/Logo/insightsPV-Logo-IOS.png",
         "backgroundColor": "#E6F4FE"
       },
+      "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.sentinelintelligencesystems.rems"
@@ -36,6 +37,7 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
+      "expo-notifications",
       "expo-font",
       "expo-image",
       "expo-web-browser"

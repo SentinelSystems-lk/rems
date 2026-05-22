@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, BackHandler, Linking, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
+import { ActivityIndicator, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { StatusBar, StatusBarStyle } from "expo-status-bar";
+import Constants from "expo-constants";
 import { SafeAreaView } from "react-native-safe-area-context";
 import WebView from "react-native-webview";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
 import * as SplashScreen from "expo-splash-screen";
+import { getBackendUrl, FORCE_PUSH_SYNC } from "./config";
 
 type Mode = "monitoring" | "maintainance";
 
@@ -329,11 +331,126 @@ export default function WebviewScreen() {
     }
   }
 
+  async function syncExpoPushTokenToBackend(authToken?: string | null) {
+    try {
+      // Runtime requires keep the bundle stable even if the package is temporarily missing.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Notifications = require("expo-notifications");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Device = require("expo-device");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SecureStore = require("expo-secure-store");
+
+      if (!Device?.isDevice) {
+        console.log("[Push] Physical device required for Expo push tokens");
+        return;
+      }
+
+      const storedAuthToken = authToken ?? (await SecureStore.getItemAsync("jwt"));
+      if (!storedAuthToken) {
+        console.log("[Push] No auth token available yet; skipping push-token sync");
+        return;
+      }
+
+      // Log limited auth token info for debugging (don't log full token in production)
+      try {
+        const short = typeof storedAuthToken === 'string' ? storedAuthToken.substring(0, 20) + '...' : String(storedAuthToken);
+        console.log("[Push] Using auth token:", short);
+        const tokenInfo = decodeJwt(storedAuthToken as string);
+        if (tokenInfo) {
+          console.log("[Push] Auth token payload:", { sub: tokenInfo.sub, iss: tokenInfo.iss, exp: tokenInfo.exp });
+        }
+        if (typeof __DEV__ !== 'undefined' && __DEV__) {
+          console.log("[Push] Full auth token (dev only):", storedAuthToken);
+        }
+      } catch (e) {
+        console.log("[Push] Failed to decode auth token for debug:", e);
+      }
+
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== "granted") {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== "granted") {
+        console.log("[Push] Notification permission denied; skipping push-token sync");
+        return;
+      }
+
+      const projectId =
+        Constants.easConfig?.projectId ??
+        Constants.expoConfig?.extra?.eas?.projectId;
+
+      const pushTokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
+      const expoPushToken = pushTokenResponse?.data;
+
+      if (!expoPushToken) {
+        console.log("[Push] Failed to obtain Expo push token");
+        return;
+      }
+
+      console.log("[Push] Expo push token:", expoPushToken);
+
+      const storageKey = `expo_push_token_sent_${normalizedMode}`;
+      const ownerKey = `expo_push_token_owner_${normalizedMode}`;
+      const lastSentToken = await AsyncStorage.getItem(storageKey);
+      const lastOwner = await AsyncStorage.getItem(ownerKey);
+
+      let currentOwner: string | null = null;
+      try {
+        const info = decodeJwt(storedAuthToken as string) as any;
+        currentOwner = info?.sub ? String(info.sub) : null;
+      } catch {}
+
+      // Always send the token to the backend so the server can decide how to handle duplicates
+      console.log("[Push] Forcing push-token sync to backend", { lastSentToken, lastOwner, currentOwner });
+
+      const endpoint = getBackendUrl("/api/push-tokens");
+      console.log("[Push] Sending push-token to:", endpoint);
+      console.log("[Push] Payload preview:", { expoPushToken: expoPushToken ? expoPushToken.substring(0, 16) + '...' : null, platform: Platform.OS, mode: normalizedMode });
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${storedAuthToken}`,
+        },
+        body: JSON.stringify({
+          expoPushToken,
+          platform: Platform.OS,
+          mode: normalizedMode,
+        }),
+      });
+
+      if (!response.ok) {
+        const responseText = await response.text().catch(() => "");
+        console.log("[Push] Backend response:", { status: response.status, body: responseText });
+        throw new Error(`Push token sync failed with ${response.status}: ${responseText}`);
+      }
+      await AsyncStorage.setItem(storageKey, expoPushToken);
+      if (currentOwner) {
+        await AsyncStorage.setItem(ownerKey, currentOwner).catch(() => {});
+      }
+      console.log("[Push] Expo push token synced to backend");
+    } catch (err) {
+      console.log("[Push] Error syncing Expo push token:", err);
+    }
+  }
+
   useEffect(() => {
     // Post stored token when screen mounts and when app returns to foreground
     postAuthToken();
+    syncExpoPushTokenToBackend();
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") postAuthToken();
+      if (state === "active") {
+        postAuthToken();
+        syncExpoPushTokenToBackend();
+      }
     });
 
     return () => {
@@ -476,6 +593,7 @@ export default function WebviewScreen() {
                 const ss = require("expo-secure-store");
                 ss.setItemAsync("jwt", data.token).then(() => {
                   console.log("[WebView] ✅ Token SAVED to SecureStore successfully");
+                  syncExpoPushTokenToBackend(data.token);
                 }).catch((err: any) => {
                   console.log("[WebView] ❌ Failed saving token to SecureStore:", err);
                 });

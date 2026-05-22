@@ -19,8 +19,8 @@ function getSourceUri(mode: string | string[] | undefined) {
     return "https://cmms.sentinel.lk/cmms";
   }
 
-  // return "https://7s6i6.sentinel.lk/";
-  return "http://192.168.1.122:5173/";
+  return "https://7s6i6.sentinel.lk/";
+  // return "http://192.168.1.122:5173/";
 }
 
 function normalizeUrl(url: string | null | undefined) {

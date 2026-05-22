@@ -7,11 +7,6 @@
     "icon": "./assets/images/Logo/insightsPV-Logo-IOS.png",
     "scheme": "InsightsPV",
     "userInterfaceStyle": "automatic",
-    "splash": {
-      "image": "./assets/images/Logo/logo.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,

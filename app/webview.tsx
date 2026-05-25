@@ -181,14 +181,17 @@ function addCacheBuster(url: string, version: string) {
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
-  const { mode } = useLocalSearchParams<{ mode?: Mode }>();
+  const { mode, siteUrl } = useLocalSearchParams<{ mode?: Mode; siteUrl?: string }>();
   const sourceUri = normalizeUrl(getSourceUri(mode));
+  const providedSiteUrl = Array.isArray(siteUrl) ? siteUrl[0] : siteUrl;
+  const normalizedProvidedUrl = normalizeUrl(providedSiteUrl);
   const systemScheme = useColorScheme();
 
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
+  const showSelector = typeof normalizedMode === "undefined" || normalizedMode === null;
   const isMaintainance = normalizedMode === "maintainance";
   const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
-  const [initialUrl, setInitialUrl] = useState(sourceUri);
+  const [initialUrl, setInitialUrl] = useState(normalizedProvidedUrl || sourceUri);
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
   // Default safe area color: use pure black
@@ -201,6 +204,13 @@ export default function WebviewScreen() {
   const versionProbeRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
+    // If a siteUrl param was provided, prefer it and skip overwriting initialUrl.
+    if (normalizedProvidedUrl) {
+      setInitialUrl(normalizedProvidedUrl);
+      setCurrentUrl(normalizedProvidedUrl);
+      return;
+    }
+
     setInitialUrl(sourceUri);
     setCurrentUrl(sourceUri);
   }, [sourceUri]);
@@ -210,8 +220,32 @@ export default function WebviewScreen() {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
+  if (showSelector) {
+    return (
+      <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
+        <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
+        <View style={styles.selectorContainer}>
+          <Text style={styles.selectorTitle}>Choose a view</Text>
+          <Pressable
+            style={styles.optionButton}
+            onPress={() => router.push({ pathname: "/webview", params: { mode: "monitoring" } })}
+          >
+            <Text style={styles.optionText}>Monitoring</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.optionButton, { marginTop: 12 }]}
+            onPress={() => router.push({ pathname: "/webview", params: { mode: "maintainance" } })}
+          >
+            <Text style={styles.optionText}>Maintenance</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   // Restore saved URL from storage on mount (only if JWT token is still valid)
   useEffect(() => {
+    if (normalizedProvidedUrl) return; // already provided by index, skip AsyncStorage restore
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const AsyncStorageModule = require("@react-native-async-storage/async-storage");
@@ -316,6 +350,25 @@ export default function WebviewScreen() {
     return versionProbeRef.current;
   }
 
+  async function clearSavedLaunchState() {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SecureStore = require("expo-secure-store");
+
+      if (!AsyncStorage) return;
+
+      await AsyncStorage.removeItem("webview_last_state");
+      await AsyncStorage.removeItem(`webview_url_${normalizedMode}`);
+      await AsyncStorage.removeItem(`webview_remote_version_${normalizedMode}`);
+      await SecureStore.deleteItemAsync("jwt").catch(() => {});
+    } catch (err) {
+      console.log("[WebView] Failed to clear saved launch state:", err);
+    }
+  }
+
   // Save current URL to storage when it changes
   useEffect(() => {
     if (currentUrl && currentUrl !== sourceUri) {
@@ -333,6 +386,14 @@ export default function WebviewScreen() {
         AsyncStorage.setItem(storageKey, normalizeUrl(currentUrl)).catch((err: any) =>
           console.log("[WebView] Failed to save URL:", err)
         );
+        AsyncStorage.setItem(
+          "webview_last_state",
+          JSON.stringify({
+            mode: normalizedMode,
+            url: normalizeUrl(currentUrl),
+            updatedAt: Date.now(),
+          })
+        ).catch((err: any) => console.log("[WebView] Failed to save last state:", err));
       } catch (err) {
         console.log("[WebView] AsyncStorage not available:", err);
       }
@@ -342,12 +403,14 @@ export default function WebviewScreen() {
   usePreventRemove(preventRemove, () => {
     setPreventRemove(false);
     setTimeout(() => {
+      void clearSavedLaunchState();
       router.replace("/");
     }, 0);
   });
 
   function handleBackNavigation() {
     setPreventRemove(false);
+    void clearSavedLaunchState();
     router.replace("/");
     return true;
   }
@@ -527,11 +590,11 @@ export default function WebviewScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
       <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
-      {/* {showBackButton ? (
+      {showBackButton ? (
         <Pressable style={styles.floatingBackButton} onPress={handleBackPress}>
           <Text style={styles.floatingBackText}>Back</Text>
         </Pressable>
-      ) : null} */}
+      ) : null}
       <WebView
         ref={webviewRef}
         source={{ uri: initialUrl }}
@@ -639,6 +702,7 @@ export default function WebviewScreen() {
                     const ss = require("expo-secure-store");
                     ss.setItemAsync("jwt", "").catch(() => {});
                   } catch {}
+                  void clearSavedLaunchState();
                   // Optionally notify the page to redirect to login
                   webviewRef.current?.postMessage(JSON.stringify({ type: "token_expired" }));
                 }, expiryMs - now);
@@ -745,5 +809,31 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: HEADER_BG_COLOR,
+  },
+  selectorContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    backgroundColor: HEADER_BG_COLOR,
+  },
+  selectorTitle: {
+    color: "#ffffff",
+    fontSize: 20,
+    fontWeight: "700",
+    marginBottom: 18,
+  },
+  optionButton: {
+    backgroundColor: "#0f1724",
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    minWidth: 220,
+    alignItems: "center",
+  },
+  optionText: {
+    color: "#eaf3ff",
+    fontSize: 16,
+    fontWeight: "600",
   },
 });

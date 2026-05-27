@@ -16,8 +16,8 @@ const HEADER_BG_COLOR = "#0b0b0b";
 function getSourceUri(mode: string | string[] | undefined) {
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
   if (normalizedMode === "maintainance") {
-    return "https://cmms.sentinel.lk";
     // return "https://cmms.sentinel.lk";
+    return "http://localhost:3000/login";
   }
 
   return "https://7s6i6.sentinel.lk/";

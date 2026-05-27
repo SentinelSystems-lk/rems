@@ -16,11 +16,12 @@ const HEADER_BG_COLOR = "#0b0b0b";
 function getSourceUri(mode: string | string[] | undefined) {
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
   if (normalizedMode === "maintainance") {
-    return "https://cmms.sentinel.lk/cmms";
+    return "https://cmms.sentinel.lk";
+    // return "https://cmms.sentinel.lk";
   }
 
   return "https://7s6i6.sentinel.lk/";
-  // return "http://192.168.1.122:5173/";
+  // return "http://localhost:5173/";
 }
 
 function normalizeUrl(url: string | null | undefined) {
@@ -42,25 +43,20 @@ function normalizeUrl(url: string | null | undefined) {
   return normalized;
 }
 
-function isLoginRoute(url: string | undefined) {
-  if (!url) return false;
-
-  try {
-    const parsed = new URL(url);
-    return parsed.pathname === "/login";
-  } catch {
-    return url.includes("/login");
-  }
+function isLoginPath(path: string | undefined) {
+  if (!path) return false;
+  const normalizedPath = path.trim().replace(/\/+$/, "");
+  return normalizedPath === "/login" || normalizedPath.endsWith("/login");
 }
 
-function shouldShowBackButton(url: string | undefined) {
-  if (!url) return false;
+function shouldShowBackButton(urlOrPath: string | undefined) {
+  if (!urlOrPath) return false;
 
   try {
-    const parsed = new URL(url);
-    return parsed.pathname === "/login";
+    const parsed = new URL(urlOrPath);
+    return isLoginPath(parsed.pathname);
   } catch {
-    return url.includes("/login");
+    return isLoginPath(urlOrPath);
   }
 }
 
@@ -202,6 +198,27 @@ export default function WebviewScreen() {
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const versionProbeRef = useRef<Promise<void> | null>(null);
+  const restoreUrlRef = useRef<Promise<void> | null>(null);
+  const currentUrlRef = useRef(currentUrl);
+  const sourceUriRef = useRef(sourceUri);
+  const normalizedModeRef = useRef(normalizedMode);
+  const normalizedProvidedUrlRef = useRef(normalizedProvidedUrl);
+
+  useEffect(() => {
+    currentUrlRef.current = currentUrl;
+  }, [currentUrl]);
+
+  useEffect(() => {
+    sourceUriRef.current = sourceUri;
+  }, [sourceUri]);
+
+  useEffect(() => {
+    normalizedModeRef.current = normalizedMode;
+  }, [normalizedMode]);
+
+  useEffect(() => {
+    normalizedProvidedUrlRef.current = normalizedProvidedUrl;
+  }, [normalizedProvidedUrl]);
 
   useEffect(() => {
     // If a siteUrl param was provided, prefer it and skip overwriting initialUrl.
@@ -213,7 +230,7 @@ export default function WebviewScreen() {
 
     setInitialUrl(sourceUri);
     setCurrentUrl(sourceUri);
-  }, [sourceUri]);
+  }, [sourceUri, normalizedProvidedUrl]);
 
   // Hide splash screen on mount
   useEffect(() => {
@@ -243,60 +260,61 @@ export default function WebviewScreen() {
     );
   }
 
-  // Restore saved URL from storage on mount (only if JWT token is still valid)
-  useEffect(() => {
-    if (normalizedProvidedUrl) return; // already provided by index, skip AsyncStorage restore
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
-      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
-      
-      if (!AsyncStorage) {
-        console.log("[WebView] AsyncStorage not available - skipping URL restore");
-        return;
+  async function restoreSavedUrlFromStorage() {
+    if (normalizedProvidedUrlRef.current) return;
+    if (currentUrlRef.current && currentUrlRef.current !== sourceUriRef.current) return;
+    if (restoreUrlRef.current) return restoreUrlRef.current;
+
+    restoreUrlRef.current = (async () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+        const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+        if (!AsyncStorage) {
+          console.log("[WebView] AsyncStorage not available - skipping URL restore");
+          return;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const SecureStore = require("expo-secure-store");
+        const storageKey = `webview_url_${normalizedModeRef.current}`;
+
+        const token = await SecureStore.getItemAsync("jwt");
+        if (!token) {
+          console.log("[WebView] No token found, clearing saved URL");
+          await AsyncStorage.removeItem(storageKey).catch(() => {});
+          return;
+        }
+
+        const expiry = getTokenExpiry(token);
+        const isExpired = expiry && new Date(expiry) < new Date();
+        if (isExpired) {
+          console.log("[WebView] Token expired, clearing saved URL");
+          await AsyncStorage.removeItem(storageKey).catch(() => {});
+          return;
+        }
+
+        const savedUrl = await AsyncStorage.getItem(storageKey);
+        const normalizedSavedUrl = normalizeUrl(savedUrl);
+        if (!normalizedSavedUrl) return;
+
+        console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
+        setInitialUrl(normalizedSavedUrl);
+        setCurrentUrl(normalizedSavedUrl);
+        void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
+      } catch (err) {
+        console.log("[WebView] Storage check failed:", err);
+      } finally {
+        restoreUrlRef.current = null;
       }
-      
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const SecureStore = require("expo-secure-store");
+    })();
 
-      const storageKey = `webview_url_${normalizedMode}`;
+    return restoreUrlRef.current;
+  }
 
-      // First check if token is still valid
-      SecureStore.getItemAsync("jwt")
-        .then((token: string | null) => {
-          if (token) {
-            const expiry = getTokenExpiry(token);
-            const isExpired = expiry && new Date(expiry) < new Date();
-
-            if (!isExpired) {
-              // Token is valid, safe to restore URL
-              AsyncStorage.getItem(storageKey)
-                .then((savedUrl: string | null) => {
-                  const normalizedSavedUrl = normalizeUrl(savedUrl);
-                  if (normalizedSavedUrl) {
-                    console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
-                    setInitialUrl(normalizedSavedUrl);
-                    setCurrentUrl(normalizedSavedUrl);
-                    void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
-                  }
-                })
-                .catch((err: any) => console.log("[WebView] Failed to restore URL:", err));
-            } else {
-              // Token expired, clear saved URL to force login
-              console.log("[WebView] Token expired, clearing saved URL");
-              AsyncStorage.removeItem(storageKey).catch(() => {});
-            }
-          } else {
-            // No token, clear saved URL
-            console.log("[WebView] No token found, clearing saved URL");
-            AsyncStorage.removeItem(storageKey).catch(() => {});
-          }
-        })
-        .catch((err: any) => console.log("[WebView] Failed to check token:", err));
-    } catch (err) {
-      console.log("[WebView] Storage check failed:", err);
-    }
-  }, []);
+  useEffect(() => {
+    void restoreSavedUrlFromStorage();
+  }, [currentUrl, normalizedMode, normalizedProvidedUrl, sourceUri]);
 
   async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
     if (versionProbeRef.current) {
@@ -577,6 +595,7 @@ export default function WebviewScreen() {
       if (state === "active") {
         postAuthToken();
         syncExpoPushTokenToBackend();
+        void restoreSavedUrlFromStorage();
         void maybeReloadIfWebsiteChanged();
       }
     });
@@ -745,7 +764,11 @@ export default function WebviewScreen() {
             if (data.type === "route") {
               const path = typeof data.path === "string" ? data.path : "";
               const url = typeof data.url === "string" ? data.url : "";
-              setShowBackButton(path === "/login" || shouldShowBackButton(url));
+              const nextUrl = normalizeUrl(url);
+              setShowBackButton(shouldShowBackButton(path) || shouldShowBackButton(nextUrl));
+              if (nextUrl && nextUrl !== currentUrl) {
+                setCurrentUrl(nextUrl);
+              }
               return;
             }
 

@@ -184,10 +184,8 @@ export default function Home() {
         <StatusBar style="light" backgroundColor="#000000" />
 
         <View style={styles.brandShellSmall}>
-          <View style={styles.logoFrameSmall}>
-            <Image source={require("../assets/images/Logo/logo.png")} resizeMode="contain" style={styles.logoSmall} />
-          </View>
-          <Text style={styles.titleSmall}>InsightsPV</Text>
+          <Image source={require("../assets/images/Logo/logo.png")} resizeMode="contain" style={styles.logoSmall} />
+          {/* <Text style={styles.titleSmall}>InsightsPV</Text> */}
           <Text style={styles.subtitleSmall}>Renewable Energy Management</Text>
 
           <View style={styles.buttonRow}>
@@ -219,13 +217,11 @@ export default function Home() {
       <View style={styles.glowBottom} />
 
       <Animated.View style={[styles.brandShell, { opacity: shellOpacity, transform: [{ translateY: shellOpacity.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}>
-        <Animated.View style={[styles.logoFrame, { transform: [{ scale: logoScale }] }]}>
-          <Image
-            source={require("../assets/images/Logo/logo.png")}
-            resizeMode="contain"
-            style={styles.logo}
-          />
-        </Animated.View>
+        <Animated.Image
+          source={require("../assets/images/Logo/logo.png")}
+          resizeMode="contain"
+          style={[styles.logo, { transform: [{ scale: logoScale }] }]}
+        />
 
         <Text style={styles.title}>InsightsPV</Text>
         <Text style={styles.subtitle}>Renewable Energy Management System</Text>
@@ -278,20 +274,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.04)",
   },
-  logoFrame: {
-    width: 156,
-    height: 156,
-    borderRadius: 36,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.02)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
-    marginBottom: 22,
-  },
   logo: {
-    width: 120,
-    height: 120,
+    width: 160,
+    height: 160,
   },
   title: {
     color: "#f7fbff",
@@ -368,20 +353,9 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
     elevation: 6,
   },
-  logoFrameSmall: {
-    width: 100,
-    height: 100,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.02)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.06)",
-    marginBottom: 14,
-  },
   logoSmall: {
-    width: 70,
-    height: 70,
+    width: 200,
+    height: 200,
   },
   titleSmall: {
     color: "#f7fbff",

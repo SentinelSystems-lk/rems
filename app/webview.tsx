@@ -387,6 +387,12 @@ export default function WebviewScreen() {
     }
   }
 
+  async function exitToHome() {
+    setPreventRemove(false);
+    await clearSavedLaunchState();
+    router.replace("/");
+  }
+
   // Save current URL to storage when it changes
   useEffect(() => {
     if (currentUrl && currentUrl !== sourceUri) {
@@ -419,22 +425,16 @@ export default function WebviewScreen() {
   }, [currentUrl, normalizedMode]);
 
   usePreventRemove(preventRemove, () => {
-    setPreventRemove(false);
-    setTimeout(() => {
-      void clearSavedLaunchState();
-      router.replace("/");
-    }, 0);
+    // Keep the WebView pinned in place until an explicit logout or token expiry.
   });
 
   function handleBackNavigation() {
-    setPreventRemove(false);
-    void clearSavedLaunchState();
-    router.replace("/");
+    // Block system back while the session is still active.
     return true;
   }
 
   function handleBackPress() {
-    handleBackNavigation();
+    void exitToHome();
   }
 
   useEffect(() => {
@@ -644,7 +644,143 @@ export default function WebviewScreen() {
           });
           return false;
         }}
-        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ /* also set cookie for servers that rely on cookies */ document.cookie = 'jwt=' + encodeURIComponent(d.token) + '; path=/; SameSite=None; Secure'; console.log('[RN-Auth] Cookie set'); }catch(e){ console.error('[RN-Auth] Failed to set cookie:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }})();`}
+        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ /* also set cookie for servers that rely on cookies */ document.cookie = 'jwt=' + encodeURIComponent(d.token) + '; path=/; SameSite=None; Secure'; console.log('[RN-Auth] Cookie set'); }catch(e){ console.error('[RN-Auth] Failed to set cookie:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }
+          // Intercept localStorage.setItem to detect when the web app saves a JWT
+          try {
+            var _origSetItem = localStorage.setItem.bind(localStorage);
+            localStorage.setItem = function(key, value) {
+              try { _origSetItem(key, value); } catch (e) {}
+              try {
+                if (typeof key === 'string' && key.toLowerCase() === 'jwt' && value) {
+                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: String(value) })); } catch (e) {}
+                }
+              } catch (e) {}
+            };
+
+            // If a JWT already exists on load, notify React Native
+            try {
+              var __existing_jwt = localStorage.getItem('jwt') || localStorage.getItem('JWT');
+              if (__existing_jwt) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: __existing_jwt })); } catch (e) {}
+              }
+            } catch (e) {}
+
+            // Also listen to storage events (in case the JWT is written from another context)
+            window.addEventListener('storage', function(evt) {
+              try {
+                if (evt && (evt.key === 'jwt' || evt.key === 'JWT') && evt.newValue) {
+                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: evt.newValue })); } catch (e) {}
+                }
+              } catch (e) {}
+            });
+            // Lightweight cookie poller to catch non-HttpOnly jwt cookies set by the site
+            try {
+              var __cookiePollCount = 0;
+              var __cookiePoller = setInterval(function() {
+                try {
+                  var m = document.cookie.match(/(?:^|;\s*)jwt=([^;]+)/i);
+                  var cookieJwt = m ? decodeURIComponent(m[1]) : null;
+                  if (cookieJwt) {
+                    try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: cookieJwt })); } catch (e) {}
+                    clearInterval(__cookiePoller);
+                    return;
+                  }
+                } catch (e) {}
+                __cookiePollCount++;
+                if (__cookiePollCount > 10) {
+                  try { clearInterval(__cookiePoller); } catch (e) {}
+                }
+              }, 1000);
+            } catch (e) {}
+
+            // Intercept fetch responses to look for tokens in JSON bodies or text
+            try {
+              var _origFetch = window.fetch.bind(window);
+              window.fetch = function() {
+                var args = Array.prototype.slice.call(arguments);
+                return _origFetch.apply(this, args).then(function(resp) {
+                  try {
+                    var cloned = resp.clone();
+                    cloned.text().then(function(text) {
+                      try {
+                        var ct = (cloned.headers && cloned.headers.get ? cloned.headers.get('content-type') : '') || '';
+                        var json = null;
+                        if (ct.toLowerCase().indexOf('application/json') !== -1) {
+                          try { json = JSON.parse(text); } catch (e) { json = null; }
+                        }
+
+                        var fieldNames = ['token','access_token','jwt','id_token'];
+                        if (json) {
+                          for (var i=0;i<fieldNames.length;i++){
+                            var k = fieldNames[i];
+                            if (json && typeof json[k] === 'string' && json[k].length>10) {
+                              try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: json[k]})); } catch (e) {}
+                              try { localStorage.setItem('jwt', json[k]); } catch (e) {}
+                              break;
+                            }
+                          }
+                        } else if (text) {
+                          var m = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/);
+                          if (m && m[0]) {
+                            try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: m[0]})); } catch (e) {}
+                            try { localStorage.setItem('jwt', m[0]); } catch (e) {}
+                          }
+                        }
+                      } catch (e) {}
+                    }).catch(function(){});
+                  } catch (e) {}
+                  return resp;
+                });
+              };
+            } catch (e) {}
+
+            // Intercept XHR to inspect JSON/text responses for tokens
+            try {
+              var _origXOpen = XMLHttpRequest.prototype.open;
+              var _origXSend = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function() {
+                try { this.__rn_xhr_url = arguments[1]; } catch (e) {}
+                return _origXOpen.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function() {
+                try {
+                  this.addEventListener('readystatechange', function() {
+                    try {
+                      if (this.readyState === 4) {
+                        try {
+                          var ct = this.getResponseHeader ? (this.getResponseHeader('content-type')||'') : '';
+                          var text = this.responseText;
+                          var parsed = null;
+                          if (ct.toLowerCase().indexOf('application/json') !== -1) {
+                            try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+                          }
+                          var fieldNames2 = ['token','access_token','jwt','id_token'];
+                          if (parsed) {
+                            for (var j=0;j<fieldNames2.length;j++){
+                              var kk = fieldNames2[j];
+                              if (parsed && typeof parsed[kk] === 'string' && parsed[kk].length>10) {
+                                try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: parsed[kk]})); } catch (e) {}
+                                try { localStorage.setItem('jwt', parsed[kk]); } catch (e) {}
+                                break;
+                              }
+                            }
+                          } else if (text) {
+                            var mm = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/);
+                            if (mm && mm[0]) {
+                              try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: mm[0]})); } catch (e) {}
+                              try { localStorage.setItem('jwt', mm[0]); } catch (e) {}
+                            }
+                          }
+                        } catch (e) {}
+                      }
+                    } catch (e) {}
+                  });
+                } catch (e) {}
+                return _origXSend.apply(this, arguments);
+              };
+            } catch (e) {}
+          } catch (e) {}
+        })();`}
         injectedJavaScript={`(function() {
           function send(url) {
             try {
@@ -721,9 +857,7 @@ export default function WebviewScreen() {
                     const ss = require("expo-secure-store");
                     ss.setItemAsync("jwt", "").catch(() => {});
                   } catch {}
-                  void clearSavedLaunchState();
-                  // Optionally notify the page to redirect to login
-                  webviewRef.current?.postMessage(JSON.stringify({ type: "token_expired" }));
+                  void exitToHome();
                 }, expiryMs - now);
               } else {
                 console.log("[WebView] ⚠️ Could not decode token expiry - no automatic clearing");
@@ -743,6 +877,18 @@ export default function WebviewScreen() {
               } catch (err) {
                 console.log("[WebView] ❌ SecureStore require failed:", err);
               }
+              return;
+            }
+
+            if (
+              data.type === "logout" ||
+              data.type === "LOGOUT" ||
+              data.type === "signout" ||
+              data.type === "sign_out" ||
+              data.type === "user_logout"
+            ) {
+              console.log("[WebView] Logout requested from page");
+              void exitToHome();
               return;
             }
 

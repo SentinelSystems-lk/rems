@@ -20,7 +20,7 @@
         "foregroundImage": "./assets/images/Logo/insightsPV-Logo-IOS.png",
         "backgroundColor": "#E6F4FE"
       },
-      "versionCode": 11,
+      "versionCode": 12,
       "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,

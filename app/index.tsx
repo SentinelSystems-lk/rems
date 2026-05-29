@@ -213,8 +213,6 @@ export default function Home() {
   return (
     <View style={styles.loading}>
       <StatusBar style="light" backgroundColor="#000000" />
-      <View style={styles.glowTop} />
-      <View style={styles.glowBottom} />
 
       <Animated.View style={[styles.brandShell, { opacity: shellOpacity, transform: [{ translateY: shellOpacity.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}>
         <Animated.Image
@@ -223,11 +221,8 @@ export default function Home() {
           style={[styles.logo, { transform: [{ scale: logoScale }] }]}
         />
 
-        <Text style={styles.title}>InsightsPV</Text>
-        <Text style={styles.subtitle}>Renewable Energy Management System</Text>
-
         <Animated.View style={[styles.loaderRow, { transform: [{ translateY: loaderTranslate }] }]}>
-          <ActivityIndicator size="small" color="#4ef27f" />
+          <ActivityIndicator size="small" color="#344DB9" />
           <Text style={styles.loaderText}>Preparing secure session</Text>
         </Animated.View>
       </Animated.View>
@@ -243,40 +238,17 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
-  glowTop: {
-    position: "absolute",
-    top: -140,
-    left: -90,
-    width: 300,
-    height: 300,
-    borderRadius: 300,
-    backgroundColor: "rgba(78, 242, 127, 0.12)",
-    opacity: 0.85,
-  },
-  glowBottom: {
-    position: "absolute",
-    right: -120,
-    bottom: -130,
-    width: 320,
-    height: 320,
-    borderRadius: 320,
-    backgroundColor: "rgba(82, 77, 220, 0.14)",
-    opacity: 0.9,
-  },
   brandShell: {
-    width: "86%",
-    maxWidth: 460,
+    width: "96%",
+    maxWidth: 1200,
     alignItems: "center",
-    paddingVertical: 34,
-    paddingHorizontal: 26,
-    borderRadius: 28,
-    backgroundColor: "rgba(10, 12, 14, 0.75)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.04)",
+    paddingVertical: 24,
+    paddingHorizontal: 16,
   },
   logo: {
-    width: 160,
-    height: 160,
+    width: "100%",
+    maxWidth: 1150,
+    height: 210,
   },
   title: {
     color: "#f7fbff",
@@ -295,19 +267,19 @@ const styles = StyleSheet.create({
     maxWidth: 300,
   },
   loaderRow: {
-    marginTop: 22,
+    marginTop: 14,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 999,
-    backgroundColor: "rgba(255, 255, 255, 0.04)",
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.05)",
+    borderColor: "rgba(255, 255, 255, 0.10)",
   },
   loaderText: {
-    color: "rgba(244, 247, 251, 0.9)",
+    color: "rgba(255, 255, 255, 0.86)",
     fontSize: 13,
     fontWeight: "500",
   },

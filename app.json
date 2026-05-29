@@ -5,6 +5,11 @@
     "version": "2.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/Logo/insightsPV-Logo-IOS.png",
+    "splash": {
+      "image": "./assets/images/Logo/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
     "scheme": "InsightsPV",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -32,6 +37,27 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/Logo/logo.png",
+          "imageWidth": 320,
+          "resizeMode": "contain",
+          "backgroundColor": "#000000",
+          "dark": {
+            "image": "./assets/images/Logo/logo.png",
+            "backgroundColor": "#000000"
+          },
+          "android": {
+            "image": "./assets/images/Logo/logo.png",
+            "backgroundColor": "#000000"
+          },
+          "ios": {
+            "image": "./assets/images/Logo/logo.png",
+            "backgroundColor": "#000000"
+          }
+        }
+      ],
       "expo-secure-store",
       "expo-notifications",
       "expo-font",

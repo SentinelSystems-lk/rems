@@ -50,7 +50,9 @@
           },
           "android": {
             "image": "./assets/images/Logo/logo.png",
-            "backgroundColor": "#000000"
+            "backgroundColor": "#000000",
+            "imageWidth": 150,
+            "resizeMode": "contain"
           },
           "ios": {
             "image": "./assets/images/Logo/logo.png",

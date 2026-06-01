@@ -6,7 +6,7 @@ function getEnvValue(value: string | undefined) {
 }
 
 function normalizeBackendBaseUrl(value: string) {
-  const trimmed = value.trim();
+  const trimmed = value.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
 
   if (/^https?:\/\//i.test(trimmed)) {
@@ -31,6 +31,28 @@ export function getBackendUrl(path: string) {
     throw new Error("Missing backend URL. Set EXPO_PUBLIC_BACKEND_URL or expo.extra.backendUrl.");
   }
 
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return new URL(normalizedPath, BACKEND_BASE_URL).toString();
+  // If `path` is already an absolute URL, return it as-is.
+  if (/^https?:\/\//i.test(path)) return path;
+
+  // Ensure base has no trailing slash and path has no leading slash, then join.
+  const base = BACKEND_BASE_URL.replace(/\/+$/, "");
+  let rel = path.startsWith("/") ? path.replace(/^\/+/, "") : path;
+
+  // If the base already contains a path prefix (e.g. '/api') and the requested
+  // path begins with the same prefix, strip the duplicate to avoid '/api/api/...'.
+  try {
+    const baseUrlObj = new URL(base);
+    const basePath = (baseUrlObj.pathname || "").replace(/^\/+|\/+$/g, "");
+    if (basePath) {
+      if (rel === basePath) {
+        rel = "";
+      } else if (rel.startsWith(basePath + "/")) {
+        rel = rel.slice(basePath.length + 1);
+      }
+    }
+  } catch (e) {
+    // ignore and join normally
+  }
+
+  return rel ? `${base}/${rel}` : base;
 }

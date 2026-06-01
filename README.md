@@ -52,6 +52,8 @@ Join our community of developers creating universal apps.
 ```bash
 eas build --platform android --profile production --local
 
-
 eas build --platform ios --profile production --local
+
+eas build --platform ios --profile production --local --non-interactive
+
 ```

@@ -16,10 +16,12 @@ const HEADER_BG_COLOR = "#0b0b0b";
 function getSourceUri(mode: string | string[] | undefined) {
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
   if (normalizedMode === "maintainance") {
-    return "https://cmms.sentinel.lk/cmms";
+    return "https://cmms.sentinel.lk";
+    // return "http://localhost:3000/login";
   }
 
   return "https://7s6i6.sentinel.lk/";
+  // return "http://localhost:5173/";
 }
 
 function normalizeUrl(url: string | null | undefined) {
@@ -41,25 +43,20 @@ function normalizeUrl(url: string | null | undefined) {
   return normalized;
 }
 
-function isLoginRoute(url: string | undefined) {
-  if (!url) return false;
-
-  try {
-    const parsed = new URL(url);
-    return parsed.pathname === "/login";
-  } catch {
-    return url.includes("/login");
-  }
+function isLoginPath(path: string | undefined) {
+  if (!path) return false;
+  const normalizedPath = path.trim().replace(/\/+$/, "");
+  return normalizedPath === "/login" || normalizedPath.endsWith("/login");
 }
 
-function shouldShowBackButton(url: string | undefined) {
-  if (!url) return false;
+function shouldShowBackButton(urlOrPath: string | undefined) {
+  if (!urlOrPath) return false;
 
   try {
-    const parsed = new URL(url);
-    return parsed.pathname === "/login";
+    const parsed = new URL(urlOrPath);
+    return isLoginPath(parsed.pathname);
   } catch {
-    return url.includes("/login");
+    return isLoginPath(urlOrPath);
   }
 }
 
@@ -180,14 +177,17 @@ function addCacheBuster(url: string, version: string) {
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
-  const { mode } = useLocalSearchParams<{ mode?: Mode }>();
+  const { mode, siteUrl } = useLocalSearchParams<{ mode?: Mode; siteUrl?: string }>();
   const sourceUri = normalizeUrl(getSourceUri(mode));
+  const providedSiteUrl = Array.isArray(siteUrl) ? siteUrl[0] : siteUrl;
+  const normalizedProvidedUrl = normalizeUrl(providedSiteUrl);
   const systemScheme = useColorScheme();
 
   const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
+  const showSelector = typeof normalizedMode === "undefined" || normalizedMode === null;
   const isMaintainance = normalizedMode === "maintainance";
   const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
-  const [initialUrl, setInitialUrl] = useState(sourceUri);
+  const [initialUrl, setInitialUrl] = useState(normalizedProvidedUrl || sourceUri);
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
   // Default safe area color: use pure black
@@ -198,70 +198,123 @@ export default function WebviewScreen() {
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const versionProbeRef = useRef<Promise<void> | null>(null);
+  const restoreUrlRef = useRef<Promise<void> | null>(null);
+  const currentUrlRef = useRef(currentUrl);
+  const sourceUriRef = useRef(sourceUri);
+  const normalizedModeRef = useRef(normalizedMode);
+  const normalizedProvidedUrlRef = useRef(normalizedProvidedUrl);
 
   useEffect(() => {
+    currentUrlRef.current = currentUrl;
+  }, [currentUrl]);
+
+  useEffect(() => {
+    sourceUriRef.current = sourceUri;
+  }, [sourceUri]);
+
+  useEffect(() => {
+    normalizedModeRef.current = normalizedMode;
+  }, [normalizedMode]);
+
+  useEffect(() => {
+    normalizedProvidedUrlRef.current = normalizedProvidedUrl;
+  }, [normalizedProvidedUrl]);
+
+  useEffect(() => {
+    // If a siteUrl param was provided, prefer it and skip overwriting initialUrl.
+    if (normalizedProvidedUrl) {
+      setInitialUrl(normalizedProvidedUrl);
+      setCurrentUrl(normalizedProvidedUrl);
+      return;
+    }
+
     setInitialUrl(sourceUri);
     setCurrentUrl(sourceUri);
-  }, [sourceUri]);
+  }, [sourceUri, normalizedProvidedUrl]);
 
   // Hide splash screen on mount
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
-  // Restore saved URL from storage on mount (only if JWT token is still valid)
-  useEffect(() => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
-      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
-      
-      if (!AsyncStorage) {
-        console.log("[WebView] AsyncStorage not available - skipping URL restore");
-        return;
+  if (showSelector) {
+    return (
+      <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
+        <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
+        <View style={styles.selectorContainer}>
+          <Text style={styles.selectorTitle}>Choose a view</Text>
+          <Pressable
+            style={styles.optionButton}
+            onPress={() => router.push({ pathname: "/webview", params: { mode: "monitoring" } })}
+          >
+            <Text style={styles.optionText}>Monitoring</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.optionButton, { marginTop: 12 }]}
+            onPress={() => router.push({ pathname: "/webview", params: { mode: "maintainance" } })}
+          >
+            <Text style={styles.optionText}>Maintenance</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  async function restoreSavedUrlFromStorage() {
+    if (normalizedProvidedUrlRef.current) return;
+    if (currentUrlRef.current && currentUrlRef.current !== sourceUriRef.current) return;
+    if (restoreUrlRef.current) return restoreUrlRef.current;
+
+    restoreUrlRef.current = (async () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+        const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+        if (!AsyncStorage) {
+          console.log("[WebView] AsyncStorage not available - skipping URL restore");
+          return;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const SecureStore = require("expo-secure-store");
+        const storageKey = `webview_url_${normalizedModeRef.current}`;
+
+        const token = await SecureStore.getItemAsync("jwt");
+        if (!token) {
+          console.log("[WebView] No token found, clearing saved URL");
+          await AsyncStorage.removeItem(storageKey).catch(() => {});
+          return;
+        }
+
+        const expiry = getTokenExpiry(token);
+        const isExpired = expiry && new Date(expiry) < new Date();
+        if (isExpired) {
+          console.log("[WebView] Token expired, clearing saved URL");
+          await AsyncStorage.removeItem(storageKey).catch(() => {});
+          return;
+        }
+
+        const savedUrl = await AsyncStorage.getItem(storageKey);
+        const normalizedSavedUrl = normalizeUrl(savedUrl);
+        if (!normalizedSavedUrl) return;
+
+        console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
+        setInitialUrl(normalizedSavedUrl);
+        setCurrentUrl(normalizedSavedUrl);
+        void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
+      } catch (err) {
+        console.log("[WebView] Storage check failed:", err);
+      } finally {
+        restoreUrlRef.current = null;
       }
-      
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const SecureStore = require("expo-secure-store");
+    })();
 
-      const storageKey = `webview_url_${normalizedMode}`;
+    return restoreUrlRef.current;
+  }
 
-      // First check if token is still valid
-      SecureStore.getItemAsync("jwt")
-        .then((token: string | null) => {
-          if (token) {
-            const expiry = getTokenExpiry(token);
-            const isExpired = expiry && new Date(expiry) < new Date();
-
-            if (!isExpired) {
-              // Token is valid, safe to restore URL
-              AsyncStorage.getItem(storageKey)
-                .then((savedUrl: string | null) => {
-                  const normalizedSavedUrl = normalizeUrl(savedUrl);
-                  if (normalizedSavedUrl) {
-                    console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
-                    setInitialUrl(normalizedSavedUrl);
-                    setCurrentUrl(normalizedSavedUrl);
-                    void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
-                  }
-                })
-                .catch((err: any) => console.log("[WebView] Failed to restore URL:", err));
-            } else {
-              // Token expired, clear saved URL to force login
-              console.log("[WebView] Token expired, clearing saved URL");
-              AsyncStorage.removeItem(storageKey).catch(() => {});
-            }
-          } else {
-            // No token, clear saved URL
-            console.log("[WebView] No token found, clearing saved URL");
-            AsyncStorage.removeItem(storageKey).catch(() => {});
-          }
-        })
-        .catch((err: any) => console.log("[WebView] Failed to check token:", err));
-    } catch (err) {
-      console.log("[WebView] Storage check failed:", err);
-    }
-  }, []);
+  useEffect(() => {
+    void restoreSavedUrlFromStorage();
+  }, [currentUrl, normalizedMode, normalizedProvidedUrl, sourceUri]);
 
   async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
     if (versionProbeRef.current) {
@@ -315,6 +368,31 @@ export default function WebviewScreen() {
     return versionProbeRef.current;
   }
 
+  async function clearSavedLaunchState() {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const AsyncStorageModule = require("@react-native-async-storage/async-storage");
+      const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SecureStore = require("expo-secure-store");
+
+      if (!AsyncStorage) return;
+
+      await AsyncStorage.removeItem("webview_last_state");
+      await AsyncStorage.removeItem(`webview_url_${normalizedMode}`);
+      await AsyncStorage.removeItem(`webview_remote_version_${normalizedMode}`);
+      await SecureStore.deleteItemAsync("jwt").catch(() => {});
+    } catch (err) {
+      console.log("[WebView] Failed to clear saved launch state:", err);
+    }
+  }
+
+  async function exitToHome() {
+    setPreventRemove(false);
+    await clearSavedLaunchState();
+    router.replace("/");
+  }
+
   // Save current URL to storage when it changes
   useEffect(() => {
     if (currentUrl && currentUrl !== sourceUri) {
@@ -332,6 +410,14 @@ export default function WebviewScreen() {
         AsyncStorage.setItem(storageKey, normalizeUrl(currentUrl)).catch((err: any) =>
           console.log("[WebView] Failed to save URL:", err)
         );
+        AsyncStorage.setItem(
+          "webview_last_state",
+          JSON.stringify({
+            mode: normalizedMode,
+            url: normalizeUrl(currentUrl),
+            updatedAt: Date.now(),
+          })
+        ).catch((err: any) => console.log("[WebView] Failed to save last state:", err));
       } catch (err) {
         console.log("[WebView] AsyncStorage not available:", err);
       }
@@ -339,20 +425,16 @@ export default function WebviewScreen() {
   }, [currentUrl, normalizedMode]);
 
   usePreventRemove(preventRemove, () => {
-    setPreventRemove(false);
-    setTimeout(() => {
-      router.replace("/");
-    }, 0);
+    // Keep the WebView pinned in place until an explicit logout or token expiry.
   });
 
   function handleBackNavigation() {
-    setPreventRemove(false);
-    router.replace("/");
+    // Block system back while the session is still active.
     return true;
   }
 
   function handleBackPress() {
-    handleBackNavigation();
+    void exitToHome();
   }
 
   useEffect(() => {
@@ -513,6 +595,7 @@ export default function WebviewScreen() {
       if (state === "active") {
         postAuthToken();
         syncExpoPushTokenToBackend();
+        void restoreSavedUrlFromStorage();
         void maybeReloadIfWebsiteChanged();
       }
     });
@@ -526,11 +609,11 @@ export default function WebviewScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
       <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
-      {/* {showBackButton ? (
+      {showBackButton ? (
         <Pressable style={styles.floatingBackButton} onPress={handleBackPress}>
           <Text style={styles.floatingBackText}>Back</Text>
         </Pressable>
-      ) : null} */}
+      ) : null}
       <WebView
         ref={webviewRef}
         source={{ uri: initialUrl }}
@@ -561,7 +644,143 @@ export default function WebviewScreen() {
           });
           return false;
         }}
-        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ /* also set cookie for servers that rely on cookies */ document.cookie = 'jwt=' + encodeURIComponent(d.token) + '; path=/; SameSite=None; Secure'; console.log('[RN-Auth] Cookie set'); }catch(e){ console.error('[RN-Auth] Failed to set cookie:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }})();`}
+        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ /* also set cookie for servers that rely on cookies */ document.cookie = 'jwt=' + encodeURIComponent(d.token) + '; path=/; SameSite=None; Secure'; console.log('[RN-Auth] Cookie set'); }catch(e){ console.error('[RN-Auth] Failed to set cookie:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }
+          // Intercept localStorage.setItem to detect when the web app saves a JWT
+          try {
+            var _origSetItem = localStorage.setItem.bind(localStorage);
+            localStorage.setItem = function(key, value) {
+              try { _origSetItem(key, value); } catch (e) {}
+              try {
+                if (typeof key === 'string' && key.toLowerCase() === 'jwt' && value) {
+                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: String(value) })); } catch (e) {}
+                }
+              } catch (e) {}
+            };
+
+            // If a JWT already exists on load, notify React Native
+            try {
+              var __existing_jwt = localStorage.getItem('jwt') || localStorage.getItem('JWT');
+              if (__existing_jwt) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: __existing_jwt })); } catch (e) {}
+              }
+            } catch (e) {}
+
+            // Also listen to storage events (in case the JWT is written from another context)
+            window.addEventListener('storage', function(evt) {
+              try {
+                if (evt && (evt.key === 'jwt' || evt.key === 'JWT') && evt.newValue) {
+                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: evt.newValue })); } catch (e) {}
+                }
+              } catch (e) {}
+            });
+            // Lightweight cookie poller to catch non-HttpOnly jwt cookies set by the site
+            try {
+              var __cookiePollCount = 0;
+              var __cookiePoller = setInterval(function() {
+                try {
+                  var m = document.cookie.match(/(?:^|;\s*)jwt=([^;]+)/i);
+                  var cookieJwt = m ? decodeURIComponent(m[1]) : null;
+                  if (cookieJwt) {
+                    try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: cookieJwt })); } catch (e) {}
+                    clearInterval(__cookiePoller);
+                    return;
+                  }
+                } catch (e) {}
+                __cookiePollCount++;
+                if (__cookiePollCount > 10) {
+                  try { clearInterval(__cookiePoller); } catch (e) {}
+                }
+              }, 1000);
+            } catch (e) {}
+
+            // Intercept fetch responses to look for tokens in JSON bodies or text
+            try {
+              var _origFetch = window.fetch.bind(window);
+              window.fetch = function() {
+                var args = Array.prototype.slice.call(arguments);
+                return _origFetch.apply(this, args).then(function(resp) {
+                  try {
+                    var cloned = resp.clone();
+                    cloned.text().then(function(text) {
+                      try {
+                        var ct = (cloned.headers && cloned.headers.get ? cloned.headers.get('content-type') : '') || '';
+                        var json = null;
+                        if (ct.toLowerCase().indexOf('application/json') !== -1) {
+                          try { json = JSON.parse(text); } catch (e) { json = null; }
+                        }
+
+                        var fieldNames = ['token','access_token','jwt','id_token'];
+                        if (json) {
+                          for (var i=0;i<fieldNames.length;i++){
+                            var k = fieldNames[i];
+                            if (json && typeof json[k] === 'string' && json[k].length>10) {
+                              try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: json[k]})); } catch (e) {}
+                              try { localStorage.setItem('jwt', json[k]); } catch (e) {}
+                              break;
+                            }
+                          }
+                        } else if (text) {
+                          var m = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/);
+                          if (m && m[0]) {
+                            try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: m[0]})); } catch (e) {}
+                            try { localStorage.setItem('jwt', m[0]); } catch (e) {}
+                          }
+                        }
+                      } catch (e) {}
+                    }).catch(function(){});
+                  } catch (e) {}
+                  return resp;
+                });
+              };
+            } catch (e) {}
+
+            // Intercept XHR to inspect JSON/text responses for tokens
+            try {
+              var _origXOpen = XMLHttpRequest.prototype.open;
+              var _origXSend = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function() {
+                try { this.__rn_xhr_url = arguments[1]; } catch (e) {}
+                return _origXOpen.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function() {
+                try {
+                  this.addEventListener('readystatechange', function() {
+                    try {
+                      if (this.readyState === 4) {
+                        try {
+                          var ct = this.getResponseHeader ? (this.getResponseHeader('content-type')||'') : '';
+                          var text = this.responseText;
+                          var parsed = null;
+                          if (ct.toLowerCase().indexOf('application/json') !== -1) {
+                            try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+                          }
+                          var fieldNames2 = ['token','access_token','jwt','id_token'];
+                          if (parsed) {
+                            for (var j=0;j<fieldNames2.length;j++){
+                              var kk = fieldNames2[j];
+                              if (parsed && typeof parsed[kk] === 'string' && parsed[kk].length>10) {
+                                try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: parsed[kk]})); } catch (e) {}
+                                try { localStorage.setItem('jwt', parsed[kk]); } catch (e) {}
+                                break;
+                              }
+                            }
+                          } else if (text) {
+                            var mm = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/);
+                            if (mm && mm[0]) {
+                              try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: mm[0]})); } catch (e) {}
+                              try { localStorage.setItem('jwt', mm[0]); } catch (e) {}
+                            }
+                          }
+                        } catch (e) {}
+                      }
+                    } catch (e) {}
+                  });
+                } catch (e) {}
+                return _origXSend.apply(this, arguments);
+              };
+            } catch (e) {}
+          } catch (e) {}
+        })();`}
         injectedJavaScript={`(function() {
           function send(url) {
             try {
@@ -638,8 +857,7 @@ export default function WebviewScreen() {
                     const ss = require("expo-secure-store");
                     ss.setItemAsync("jwt", "").catch(() => {});
                   } catch {}
-                  // Optionally notify the page to redirect to login
-                  webviewRef.current?.postMessage(JSON.stringify({ type: "token_expired" }));
+                  void exitToHome();
                 }, expiryMs - now);
               } else {
                 console.log("[WebView] ⚠️ Could not decode token expiry - no automatic clearing");
@@ -662,6 +880,18 @@ export default function WebviewScreen() {
               return;
             }
 
+            if (
+              data.type === "logout" ||
+              data.type === "LOGOUT" ||
+              data.type === "signout" ||
+              data.type === "sign_out" ||
+              data.type === "user_logout"
+            ) {
+              console.log("[WebView] Logout requested from page");
+              void exitToHome();
+              return;
+            }
+
             if (data.type === "theme" && data.scheme) {
               // CMMS safe area is always locked to oklch(0.145 0 0) → #171717
               if (isMaintainance) return;
@@ -680,7 +910,11 @@ export default function WebviewScreen() {
             if (data.type === "route") {
               const path = typeof data.path === "string" ? data.path : "";
               const url = typeof data.url === "string" ? data.url : "";
-              setShowBackButton(path === "/login" || shouldShowBackButton(url));
+              const nextUrl = normalizeUrl(url);
+              setShowBackButton(shouldShowBackButton(path) || shouldShowBackButton(nextUrl));
+              if (nextUrl && nextUrl !== currentUrl) {
+                setCurrentUrl(nextUrl);
+              }
               return;
             }
 
@@ -744,5 +978,31 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: HEADER_BG_COLOR,
+  },
+  selectorContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    backgroundColor: HEADER_BG_COLOR,
+  },
+  selectorTitle: {
+    color: "#ffffff",
+    fontSize: 20,
+    fontWeight: "700",
+    marginBottom: 18,
+  },
+  optionButton: {
+    backgroundColor: "#0f1724",
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    minWidth: 220,
+    alignItems: "center",
+  },
+  optionText: {
+    color: "#eaf3ff",
+    fontSize: 16,
+    fontWeight: "600",
   },
 });

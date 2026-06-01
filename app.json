@@ -2,9 +2,14 @@
   "expo": {
     "name": "InsightsPV",
     "slug": "InsightsPV",
-    "version": "2.0.2",
+    "version": "2.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/Logo/insightsPV-Logo-IOS.png",
+    "splash": {
+      "image": "./assets/images/Logo/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
     "scheme": "InsightsPV",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -13,13 +18,15 @@
       "bundleIdentifier": "com.sentinelintelligencesystems.rems",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
-      }
+      },
+      "buildNumber": "2"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/Logo/insightsPV-Logo-IOS.png",
         "backgroundColor": "#E6F4FE"
       },
+      "versionCode": 13,
       "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -31,6 +38,29 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/Logo/logo.png",
+          "imageWidth": 320,
+          "resizeMode": "contain",
+          "backgroundColor": "#000000",
+          "dark": {
+            "image": "./assets/images/Logo/logo.png",
+            "backgroundColor": "#000000"
+          },
+          "android": {
+            "image": "./assets/images/Logo/logo.png",
+            "backgroundColor": "#000000",
+            "imageWidth": 150,
+            "resizeMode": "contain"
+          },
+          "ios": {
+            "image": "./assets/images/Logo/logo.png",
+            "backgroundColor": "#000000"
+          }
+        }
+      ],
       "expo-secure-store",
       "expo-notifications",
       "expo-font",

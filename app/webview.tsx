@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useColorScheme } from "react-native";
+import { AppState, BackHandler, Linking, Platform, StyleSheet, useColorScheme } from "react-native";
 import { StatusBar, StatusBarStyle } from "expo-status-bar";
 import Constants from "expo-constants";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -7,21 +7,15 @@ import WebView from "react-native-webview";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
 import * as SplashScreen from "expo-splash-screen";
-import { getBackendUrl, FORCE_PUSH_SYNC } from "./config";
-
-type Mode = "monitoring" | "maintainance";
+import { getBackendUrl } from "./config";
 
 const HEADER_BG_COLOR = "#0b0b0b";
+const APP_URL = "http://localhost:5173/";
+// const APP_URL = "https://7s6i6.sentinel.lk/";
+const STORAGE_SCOPE = "monitoring";
 
-function getSourceUri(mode: string | string[] | undefined) {
-  const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
-  if (normalizedMode === "maintainance") {
-    return "https://cmms.sentinel.lk";
-    // return "http://localhost:3000/login";
-  }
-
-  return "https://7s6i6.sentinel.lk/";
-  // return "http://localhost:5173/";
+function getSourceUri() {
+  return APP_URL;
 }
 
 function normalizeUrl(url: string | null | undefined) {
@@ -41,23 +35,6 @@ function normalizeUrl(url: string | null | undefined) {
   }
 
   return normalized;
-}
-
-function isLoginPath(path: string | undefined) {
-  if (!path) return false;
-  const normalizedPath = path.trim().replace(/\/+$/, "");
-  return normalizedPath === "/login" || normalizedPath.endsWith("/login");
-}
-
-function shouldShowBackButton(urlOrPath: string | undefined) {
-  if (!urlOrPath) return false;
-
-  try {
-    const parsed = new URL(urlOrPath);
-    return isLoginPath(parsed.pathname);
-  } catch {
-    return isLoginPath(urlOrPath);
-  }
 }
 
 function getForceDarkScript() {
@@ -177,23 +154,18 @@ function addCacheBuster(url: string, version: string) {
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
-  const { mode, siteUrl } = useLocalSearchParams<{ mode?: Mode; siteUrl?: string }>();
-  const sourceUri = normalizeUrl(getSourceUri(mode));
+  const { siteUrl } = useLocalSearchParams<{ siteUrl?: string }>();
+  const sourceUri = normalizeUrl(getSourceUri());
   const providedSiteUrl = Array.isArray(siteUrl) ? siteUrl[0] : siteUrl;
   const normalizedProvidedUrl = normalizeUrl(providedSiteUrl);
   const systemScheme = useColorScheme();
 
-  const normalizedMode = Array.isArray(mode) ? mode[0] : mode;
-  const showSelector = typeof normalizedMode === "undefined" || normalizedMode === null;
-  const isMaintainance = normalizedMode === "maintainance";
-  const isMonitoring = normalizedMode === "monitoring" || !isMaintainance;
   const [initialUrl, setInitialUrl] = useState(normalizedProvidedUrl || sourceUri);
 
   // oklch(0.145 0 0) → #171717 (React Native does not support oklch in StyleSheet)
   // Default safe area color: use pure black
   const [bgColor, setBgColor] = useState(HEADER_BG_COLOR);
-  const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(isMaintainance || isMonitoring ? "light" : systemScheme === "dark" ? "light" : "dark");
-  const [showBackButton, setShowBackButton] = useState(shouldShowBackButton(sourceUri));
+  const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(systemScheme === "dark" ? "light" : "dark");
   const [preventRemove, setPreventRemove] = useState(true);
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -201,7 +173,6 @@ export default function WebviewScreen() {
   const restoreUrlRef = useRef<Promise<void> | null>(null);
   const currentUrlRef = useRef(currentUrl);
   const sourceUriRef = useRef(sourceUri);
-  const normalizedModeRef = useRef(normalizedMode);
   const normalizedProvidedUrlRef = useRef(normalizedProvidedUrl);
 
   useEffect(() => {
@@ -211,10 +182,6 @@ export default function WebviewScreen() {
   useEffect(() => {
     sourceUriRef.current = sourceUri;
   }, [sourceUri]);
-
-  useEffect(() => {
-    normalizedModeRef.current = normalizedMode;
-  }, [normalizedMode]);
 
   useEffect(() => {
     normalizedProvidedUrlRef.current = normalizedProvidedUrl;
@@ -237,29 +204,6 @@ export default function WebviewScreen() {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
-  if (showSelector) {
-    return (
-      <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
-        <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
-        <View style={styles.selectorContainer}>
-          <Text style={styles.selectorTitle}>Choose a view</Text>
-          <Pressable
-            style={styles.optionButton}
-            onPress={() => router.push({ pathname: "/webview", params: { mode: "monitoring" } })}
-          >
-            <Text style={styles.optionText}>Monitoring</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.optionButton, { marginTop: 12 }]}
-            onPress={() => router.push({ pathname: "/webview", params: { mode: "maintainance" } })}
-          >
-            <Text style={styles.optionText}>Maintenance</Text>
-          </Pressable>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   async function restoreSavedUrlFromStorage() {
     if (normalizedProvidedUrlRef.current) return;
     if (currentUrlRef.current && currentUrlRef.current !== sourceUriRef.current) return;
@@ -277,7 +221,7 @@ export default function WebviewScreen() {
 
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const SecureStore = require("expo-secure-store");
-        const storageKey = `webview_url_${normalizedModeRef.current}`;
+        const storageKey = `webview_url_${STORAGE_SCOPE}`;
 
         const token = await SecureStore.getItemAsync("jwt");
         if (!token) {
@@ -314,7 +258,7 @@ export default function WebviewScreen() {
 
   useEffect(() => {
     void restoreSavedUrlFromStorage();
-  }, [currentUrl, normalizedMode, normalizedProvidedUrl, sourceUri]);
+  }, [currentUrl, normalizedProvidedUrl, sourceUri]);
 
   async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
     if (versionProbeRef.current) {
@@ -329,7 +273,7 @@ export default function WebviewScreen() {
 
         if (!AsyncStorage) return;
 
-        const versionKey = `webview_remote_version_${normalizedMode}`;
+        const versionKey = `webview_remote_version_${STORAGE_SCOPE}`;
         const response = await fetch(sourceUri, {
           method: "HEAD",
           cache: "no-store",
@@ -379,8 +323,8 @@ export default function WebviewScreen() {
       if (!AsyncStorage) return;
 
       await AsyncStorage.removeItem("webview_last_state");
-      await AsyncStorage.removeItem(`webview_url_${normalizedMode}`);
-      await AsyncStorage.removeItem(`webview_remote_version_${normalizedMode}`);
+      await AsyncStorage.removeItem(`webview_url_${STORAGE_SCOPE}`);
+      await AsyncStorage.removeItem(`webview_remote_version_${STORAGE_SCOPE}`);
       await SecureStore.deleteItemAsync("jwt").catch(() => {});
     } catch (err) {
       console.log("[WebView] Failed to clear saved launch state:", err);
@@ -406,14 +350,14 @@ export default function WebviewScreen() {
           return;
         }
         
-        const storageKey = `webview_url_${normalizedMode}`;
+        const storageKey = `webview_url_${STORAGE_SCOPE}`;
         AsyncStorage.setItem(storageKey, normalizeUrl(currentUrl)).catch((err: any) =>
           console.log("[WebView] Failed to save URL:", err)
         );
         AsyncStorage.setItem(
           "webview_last_state",
           JSON.stringify({
-            mode: normalizedMode,
+            mode: STORAGE_SCOPE,
             url: normalizeUrl(currentUrl),
             updatedAt: Date.now(),
           })
@@ -422,7 +366,7 @@ export default function WebviewScreen() {
         console.log("[WebView] AsyncStorage not available:", err);
       }
     }
-  }, [currentUrl, normalizedMode]);
+  }, [currentUrl]);
 
   usePreventRemove(preventRemove, () => {
     // Keep the WebView pinned in place until an explicit logout or token expiry.
@@ -431,10 +375,6 @@ export default function WebviewScreen() {
   function handleBackNavigation() {
     // Block system back while the session is still active.
     return true;
-  }
-
-  function handleBackPress() {
-    void exitToHome();
   }
 
   useEffect(() => {
@@ -541,8 +481,8 @@ export default function WebviewScreen() {
 
       console.log("[Push] Expo push token:", expoPushToken);
 
-      const storageKey = `expo_push_token_sent_${normalizedMode}`;
-      const ownerKey = `expo_push_token_owner_${normalizedMode}`;
+      const storageKey = `expo_push_token_sent_${STORAGE_SCOPE}`;
+      const ownerKey = `expo_push_token_owner_${STORAGE_SCOPE}`;
       const lastSentToken = await AsyncStorage.getItem(storageKey);
       const lastOwner = await AsyncStorage.getItem(ownerKey);
 
@@ -557,7 +497,7 @@ export default function WebviewScreen() {
 
       const endpoint = getBackendUrl("/api/push-tokens");
       console.log("[Push] Sending push-token to:", endpoint);
-      console.log("[Push] Payload preview:", { expoPushToken: expoPushToken ? expoPushToken.substring(0, 16) + '...' : null, platform: Platform.OS, mode: normalizedMode });
+      console.log("[Push] Payload preview:", { expoPushToken: expoPushToken ? expoPushToken.substring(0, 16) + '...' : null, platform: Platform.OS, mode: STORAGE_SCOPE });
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -567,7 +507,7 @@ export default function WebviewScreen() {
         body: JSON.stringify({
           expoPushToken,
           platform: Platform.OS,
-          mode: normalizedMode,
+          mode: STORAGE_SCOPE,
         }),
       });
 
@@ -609,11 +549,6 @@ export default function WebviewScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
       <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
-      {showBackButton ? (
-        <Pressable style={styles.floatingBackButton} onPress={handleBackPress}>
-          <Text style={styles.floatingBackText}>Back</Text>
-        </Pressable>
-      ) : null}
       <WebView
         ref={webviewRef}
         source={{ uri: initialUrl }}
@@ -621,7 +556,6 @@ export default function WebviewScreen() {
         style={styles.webview}
         onNavigationStateChange={(navState) => {
           const nextUrl = normalizeUrl(navState.url);
-          setShowBackButton(shouldShowBackButton(nextUrl));
           if (nextUrl && nextUrl !== sourceUri && nextUrl !== currentUrl) {
             setCurrentUrl(nextUrl);
           }
@@ -893,8 +827,6 @@ export default function WebviewScreen() {
             }
 
             if (data.type === "theme" && data.scheme) {
-              // CMMS safe area is always locked to oklch(0.145 0 0) → #171717
-              if (isMaintainance) return;
               setTimeout(() => {
                 if (data.scheme === "dark") {
                   setBgColor(HEADER_BG_COLOR);
@@ -908,25 +840,11 @@ export default function WebviewScreen() {
             }
 
             if (data.type === "route") {
-              const path = typeof data.path === "string" ? data.path : "";
               const url = typeof data.url === "string" ? data.url : "";
               const nextUrl = normalizeUrl(url);
-              setShowBackButton(shouldShowBackButton(path) || shouldShowBackButton(nextUrl));
               if (nextUrl && nextUrl !== currentUrl) {
                 setCurrentUrl(nextUrl);
               }
-              return;
-            }
-
-            if (data.type === "mode_switch" && data.mode) {
-              console.log("[WebView] Mode switch requested:", data.mode);
-              const newMode = data.mode;
-              
-              // Navigate back to home and then to webview with new mode
-              router.push("/");
-              setTimeout(() => {
-                router.push({ pathname: "/webview", params: { mode: newMode } });
-              }, 300);
               return;
             }
 
@@ -947,24 +865,6 @@ export default function WebviewScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: HEADER_BG_COLOR, padding: 0, margin: 0 },
-  floatingBackButton: {
-    position: "absolute",
-    top: 50,
-    left: 14,
-    zIndex: 20,
-    borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    backgroundColor: "rgba(8, 16, 28, 0.88)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.22)",
-  },
-  floatingBackText: {
-    color: "#eaf3ff",
-    fontSize: 13,
-    fontWeight: "700",
-    letterSpacing: 0.2,
-  },
   loading: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: HEADER_BG_COLOR,
@@ -978,31 +878,5 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: HEADER_BG_COLOR,
-  },
-  selectorContainer: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-    backgroundColor: HEADER_BG_COLOR,
-  },
-  selectorTitle: {
-    color: "#ffffff",
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 18,
-  },
-  optionButton: {
-    backgroundColor: "#0f1724",
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-    minWidth: 220,
-    alignItems: "center",
-  },
-  optionText: {
-    color: "#eaf3ff",
-    fontSize: 16,
-    fontWeight: "600",
   },
 });

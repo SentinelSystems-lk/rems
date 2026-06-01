@@ -1,19 +1,17 @@
-import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Image, StyleSheet, Text, View, Animated, Easing, Pressable } from "react-native";
+import { useEffect, useRef } from "react";
+import { ActivityIndicator, StyleSheet, Text, View, Animated, Easing } from "react-native";
 import { useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 
-function getSourceUri(mode: string) {
-  return mode === "maintainance" ? "https://cmms.sentinel.lk/cmms" : "https://7s6i6.sentinel.lk/";
-}
+const APP_URL = "http://localhost:5173/";
+// const APP_URL = "https://7s6i6.sentinel.lk/";
 
-function getVersionFileUrl(mode: string) {
-  const sourceUri = getSourceUri(mode);
+function getVersionFileUrl() {
   try {
-    return new URL("version.json", sourceUri.endsWith("/") ? sourceUri : `${sourceUri}/`).toString();
+    return new URL("version.json", APP_URL.endsWith("/") ? APP_URL : `${APP_URL}/`).toString();
   } catch {
-    return `${sourceUri}version.json`;
+    return `${APP_URL}version.json`;
   }
 }
 
@@ -44,68 +42,8 @@ async function loadStorage() {
   return AsyncStorageModule?.default || AsyncStorageModule;
 }
 
-function normalizeUrl(url: string | null | undefined) {
-  if (typeof url !== "string") return "";
-  const trimmed = url.trim();
-  if (!trimmed) return "";
-
-  const embeddedHttpMatch = trimmed.match(/https?:\/\/{1,2}.*/i);
-  const normalized = embeddedHttpMatch ? embeddedHttpMatch[0] : trimmed;
-
-  if (normalized.startsWith("http:/") && !normalized.startsWith("http://")) {
-    return normalized.replace(/^http:\//, "http://");
-  }
-
-  if (normalized.startsWith("https:/") && !normalized.startsWith("https://")) {
-    return normalized.replace(/^https:\//, "https://");
-  }
-
-  return normalized;
-}
-
-type SavedLaunchState = {
-  mode?: string;
-  url?: string;
-};
-
-async function readSavedLaunchState(AsyncStorage: any) {
-  const lastState = parseSavedLaunchState(await AsyncStorage.getItem("webview_last_state"));
-  if (lastState?.url) {
-    return lastState;
-  }
-
-  const monitoringUrl = normalizeUrl(await AsyncStorage.getItem("webview_url_monitoring"));
-  if (monitoringUrl) {
-    return { mode: "monitoring", url: monitoringUrl };
-  }
-
-  const maintenanceUrl = normalizeUrl(await AsyncStorage.getItem("webview_url_maintainance"));
-  if (maintenanceUrl) {
-    return { mode: "maintainance", url: maintenanceUrl };
-  }
-
-  return null;
-}
-
-function parseSavedLaunchState(raw: string | null): SavedLaunchState | null {
-  if (!raw) return null;
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-
-    return {
-      mode: typeof parsed.mode === "string" ? parsed.mode : undefined,
-      url: typeof parsed.url === "string" ? parsed.url : undefined,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export default function Home() {
   const router = useRouter();
-  const [ready, setReady] = useState(false);
 
   // Animation refs for splash polish
   const shellOpacity = useRef(new Animated.Value(0)).current;
@@ -116,15 +54,12 @@ export default function Home() {
     let cancelled = false;
 
     async function bootstrap() {
-      const defaultMode = "monitoring";
-      const versionKey = `webview_site_version_${defaultMode}`;
-      const versionUrl = getVersionFileUrl(defaultMode);
+      const versionKey = "webview_site_version";
+      const versionUrl = getVersionFileUrl();
 
       try {
         const AsyncStorage = await loadStorage();
         const siteVersion = await readVersionFile(versionUrl);
-        const savedLaunchState = await readSavedLaunchState(AsyncStorage);
-        const launchMode = savedLaunchState?.mode === "maintainance" ? "maintainance" : "monitoring";
 
         if (siteVersion) {
           const previousVersion = await AsyncStorage.getItem(versionKey);
@@ -133,21 +68,13 @@ export default function Home() {
           }
         }
 
-        if (savedLaunchState?.url) {
-          router.replace({ pathname: "/webview", params: { mode: launchMode, siteUrl: savedLaunchState.url } });
-          if (!cancelled) {
-            await SplashScreen.hideAsync().catch(() => {});
-          }
-          return;
-        }
-
+        router.replace("/webview");
         if (!cancelled) {
-          setReady(true);
           await SplashScreen.hideAsync().catch(() => {});
         }
-      } catch (err) {
+      } catch {
+        router.replace("/webview");
         if (!cancelled) {
-          setReady(true);
           await SplashScreen.hideAsync().catch(() => {});
         }
       }
@@ -177,38 +104,6 @@ export default function Home() {
 
     return () => pulse.stop();
   }, [shellOpacity, logoScale, loaderTranslate]);
-
-  if (ready) {
-    return (
-      <View style={styles.selectorContainer}>
-        <StatusBar style="light" backgroundColor="#000000" />
-
-        <View style={styles.brandShellSmall}>
-          <Image source={require("../assets/images/Logo/logo.png")} resizeMode="contain" style={styles.logoSmall} />
-          {/* <Text style={styles.titleSmall}>InsightsPV</Text> */}
-          <Text style={styles.subtitleSmall}>Renewable Energy Management</Text>
-
-          <View style={styles.buttonRow}>
-            <Pressable
-              style={({ pressed }) => [styles.primaryButton, pressed && styles.buttonPressed]}
-              onPress={() => router.replace({ pathname: "/webview", params: { mode: "monitoring" } })}
-            >
-              <Text style={styles.primaryText}>Monitoring</Text>
-            </Pressable>
-
-            <Pressable
-              style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}
-              onPress={() => router.replace({ pathname: "/webview", params: { mode: "maintainance" } })}
-            >
-              <Text style={styles.secondaryText}>Technician</Text>
-            </Pressable>
-          </View>
-
-          {/* <Text style={styles.hintText}>Secure session will be prepared after you choose a view.</Text> */}
-        </View>
-      </View>
-    );
-  }
 
   return (
     <View style={styles.loading}>
@@ -282,109 +177,5 @@ const styles = StyleSheet.create({
     color: "rgba(255, 255, 255, 0.86)",
     fontSize: 13,
     fontWeight: "500",
-  },
-  selectorContainer: {
-    flex: 1,
-    backgroundColor: "#000",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  selectorTitle: {
-    color: "#ffffff",
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 18,
-  },
-  optionButton: {
-    backgroundColor: "#0f1724",
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-    minWidth: 220,
-    alignItems: "center",
-  },
-  optionText: {
-    color: "#eaf3ff",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  brandShellSmall: {
-    width: "86%",
-    maxWidth: 520,
-    alignItems: "center",
-    paddingVertical: 28,
-    paddingHorizontal: 20,
-    borderRadius: 20,
-    backgroundColor: "rgba(10, 12, 14, 0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.04)",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.35,
-    shadowRadius: 20,
-    elevation: 6,
-  },
-  logoSmall: {
-    width: 200,
-    height: 200,
-  },
-  titleSmall: {
-    color: "#f7fbff",
-    fontSize: 22,
-    fontWeight: "700",
-    marginBottom: 6,
-    textAlign: "center",
-  },
-  subtitleSmall: {
-    color: "rgba(228, 233, 241, 0.7)",
-    fontSize: 13,
-    marginBottom: 18,
-    textAlign: "center",
-    maxWidth: 340,
-  },
-  buttonRow: {
-    width: "100%",
-    flexDirection: "row",
-    gap: 12,
-    justifyContent: "center",
-    marginBottom: 12,
-  },
-  primaryButton: {
-    flex: 1,
-    backgroundColor: "#4ef27f",
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: "center",
-    marginHorizontal: 6,
-  },
-  primaryText: {
-    color: "#05220a",
-    fontWeight: "700",
-    fontSize: 15,
-  },
-  secondaryButton: {
-    flex: 1,
-    backgroundColor: "transparent",
-    borderWidth: 1,
-    borderColor: "rgba(231, 241, 237, 0.08)",
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: "center",
-    marginHorizontal: 6,
-  },
-  secondaryText: {
-    color: "#eaf3ff",
-    fontWeight: "700",
-    fontSize: 15,
-  },
-  buttonPressed: {
-    opacity: 0.85,
-  },
-  hintText: {
-    color: "rgba(234,243,255,0.6)",
-    fontSize: 12,
-    marginTop: 6,
-    textAlign: "center",
   },
 });

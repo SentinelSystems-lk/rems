@@ -143,6 +143,15 @@ function getTokenExpiry(token: string) {
   return (payload.exp as number) * 1000; // convert seconds to ms
 }
 
+function isPendingAuthToken(token: string) {
+  try {
+    const payload = decodeJwt(token) as any;
+    return payload?.scope === "2fa_pending";
+  } catch {
+    return false;
+  }
+}
+
 function addCacheBuster(url: string, version: string) {
   try {
     const parsed = new URL(url);
@@ -164,14 +173,37 @@ function buildCmmsTokenInjectionScript(token: string) {
 
       try {
         localStorage.setItem('${CMMS_AUTH_STORAGE_KEY}', token);
+        localStorage.setItem('${LEGACY_AUTH_STORAGE_KEY}', token);
+      } catch (e) {}
+
+      try {
+        sessionStorage.setItem('${CMMS_AUTH_STORAGE_KEY}', token);
+        sessionStorage.setItem('${LEGACY_AUTH_STORAGE_KEY}', token);
+      } catch (e) {}
+
+      try {
+        if (typeof StorageEvent === 'function') {
+          window.dispatchEvent(new StorageEvent('storage', {
+            key: '${CMMS_AUTH_STORAGE_KEY}',
+            oldValue: null,
+            newValue: token,
+            storageArea: window.localStorage,
+            url: window.location.href
+          }));
+          window.dispatchEvent(new StorageEvent('storage', {
+            key: '${LEGACY_AUTH_STORAGE_KEY}',
+            oldValue: null,
+            newValue: token,
+            storageArea: window.localStorage,
+            url: window.location.href
+          }));
+        } else {
+          window.dispatchEvent(new Event('storage'));
+        }
       } catch (e) {}
 
       try {
         window.dispatchEvent(new Event('cmms-auth-token-change'));
-      } catch (e) {}
-
-      try {
-        window.postMessage(JSON.stringify({ type: 'CMMS_TOKEN_READY' }), '*');
       } catch (e) {}
     } catch (e) {}
   })(); true;`;
@@ -202,6 +234,9 @@ function buildAuthDiscoveryScript() {
   return `(function() {
     try {
       var lastPostedToken = null;
+      var originalFetch = window.fetch;
+      var fetchPatched = false;
+      var xhrPatched = false;
 
       function looksLikeJwt(value) {
         return typeof value === 'string' && /^[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}$/.test(value.trim());
@@ -212,6 +247,57 @@ function buildAuthDiscoveryScript() {
         var trimmed = value.trim();
         if (!trimmed) return false;
         return looksLikeJwt(trimmed) || (trimmed.length > 40 && trimmed.indexOf('.') !== -1);
+      }
+
+      function extractTokenFromObject(value, seen) {
+        if (!value || typeof value !== 'object') return '';
+
+        seen = seen || [];
+        for (var i = 0; i < seen.length; i++) {
+          if (seen[i] === value) return '';
+        }
+        seen.push(value);
+
+        if (Array.isArray(value)) {
+          for (var j = 0; j < value.length; j++) {
+            var arrayToken = extractTokenFromObject(value[j], seen);
+            if (arrayToken) return arrayToken;
+          }
+          return '';
+        }
+
+        var directKeys = ['token', 'jwt', 'access_token', 'authToken', 'auth_token', 'legacy_jwt', 'cmms_auth_token'];
+        for (var k = 0; k < directKeys.length; k++) {
+          var directValue = value[directKeys[k]];
+          if (looksLikeAuthValue(directValue)) {
+            return directValue.trim();
+          }
+        }
+
+        for (var key in value) {
+          if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+          var nestedToken = extractTokenFromObject(value[key], seen);
+          if (nestedToken) return nestedToken;
+        }
+
+        return '';
+      }
+
+      function extractTokenFromText(text) {
+        if (typeof text !== 'string' || !text) return '';
+
+        try {
+          var parsed = JSON.parse(text);
+          var jsonToken = extractTokenFromObject(parsed, []);
+          if (jsonToken) return jsonToken;
+        } catch (e) {}
+
+        var matches = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/g);
+        if (matches && matches.length) {
+          return matches[0];
+        }
+
+        return '';
       }
 
       function postToken(token, source) {
@@ -229,6 +315,22 @@ function buildAuthDiscoveryScript() {
             window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: token, source: source }));
           } catch (e) {}
         } catch (e) {}
+      }
+
+      function maybePostTokenFromValue(value, source) {
+        var token = '';
+        if (typeof value === 'string') {
+          token = extractTokenFromText(value);
+          if (!token && looksLikeAuthValue(value)) {
+            token = value.trim();
+          }
+        } else if (value && typeof value === 'object') {
+          token = extractTokenFromObject(value, []);
+        }
+
+        if (token) {
+          postToken(token, source);
+        }
       }
 
       function scanStorage(storage, label) {
@@ -291,7 +393,60 @@ function buildAuthDiscoveryScript() {
         scanCookies();
       }
 
+      function patchFetch() {
+        if (fetchPatched || typeof originalFetch !== 'function') return;
+        fetchPatched = true;
+
+        window.fetch = function() {
+          var request = originalFetch.apply(this, arguments);
+          try {
+            request.then(function(response) {
+              try {
+                if (!response || typeof response.clone !== 'function') return;
+                response.clone().text().then(function(text) {
+                  var token = extractTokenFromText(text);
+                  if (token) {
+                    postToken(token, 'fetch-response');
+                  }
+                }).catch(function() {});
+              } catch (e) {}
+            }).catch(function() {});
+          } catch (e) {}
+          return request;
+        };
+      }
+
+      function patchXHR() {
+        if (xhrPatched || typeof XMLHttpRequest === 'undefined') return;
+        xhrPatched = true;
+
+        var originalOpen = XMLHttpRequest.prototype.open;
+        var originalSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function() {
+          this.__rn_auth_url = arguments[1] || '';
+          return originalOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function() {
+          try {
+            this.addEventListener('load', function() {
+              try {
+                var token = extractTokenFromText(this.responseText || '');
+                if (token) {
+                  postToken(token, 'xhr-response');
+                }
+              } catch (e) {}
+            });
+          } catch (e) {}
+
+          return originalSend.apply(this, arguments);
+        };
+      }
+
       scanAll();
+      patchFetch();
+      patchXHR();
       window.addEventListener('storage', scanAll);
       window.addEventListener('focus', scanAll);
       document.addEventListener('visibilitychange', function() {
@@ -369,11 +524,59 @@ function extractTokenFromPayload(value: unknown): string {
   return walk(value);
 }
 
+async function readStoredAuthToken(requireNonPending = false) {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ss = require("expo-secure-store");
+    const cmmsRaw = await ss.getItemAsync(CMMS_AUTH_STORAGE_KEY);
+    const legacyRaw = await ss.getItemAsync(LEGACY_AUTH_STORAGE_KEY);
+
+    const candidates = [cmmsRaw, legacyRaw]
+      .map((value) => (typeof value === "string" ? value.trim() : ""))
+      .filter((value) => Boolean(value));
+
+    let sawExpiredToken = false;
+
+    for (const candidate of candidates) {
+      const expiry = getTokenExpiry(candidate);
+      if (expiry && expiry <= Date.now()) {
+        sawExpiredToken = true;
+        continue;
+      }
+
+      if (requireNonPending && isPendingAuthToken(candidate)) {
+        continue;
+      }
+
+      return candidate;
+    }
+
+    if (sawExpiredToken) {
+      await ss.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
+      await ss.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
+    }
+
+    if (!requireNonPending) {
+      for (const candidate of candidates) {
+        const expiry = getTokenExpiry(candidate);
+        if (!expiry || expiry > Date.now()) {
+          return candidate;
+        }
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.log("[WebView] Failed to read stored auth token:", err);
+    return null;
+  }
+}
+
 function buildBeforeContentJavaScript(token: string | null) {
   const bootstrapScript = token ? buildCmmsTokenInjectionScript(token) : "true;";
   const hasBootstrapToken = Boolean(token);
 
-  return `${getForceDarkScript()}(function(){window.__rn_injected=true;console.log('[RN-CMMS] injectedJavaScriptBeforeContentLoaded running');console.log('[RN-CMMS] Bootstrap token available before load:', ${hasBootstrapToken});${buildAuthDiscoveryScript()}${bootstrapScript}if(window.addEventListener){window.addEventListener('message',function(ev){try{var d=typeof ev.data==='string'?JSON.parse(ev.data):ev.data;console.log('[RN-CMMS] Received message:',d);if(d&&d.type==='CMMS_TOKEN_READY'&&d.token){console.log('[RN-CMMS] Token received:',String(d.token).substring(0,20)+'...');try{localStorage.setItem('${CMMS_AUTH_STORAGE_KEY}',d.token);console.log('[RN-CMMS] Token saved to localStorage');window.dispatchEvent(new Event('cmms-auth-token-change'));}catch(e){console.error('[RN-CMMS] Failed to save to localStorage:',e);}}}catch(e){console.error('[RN-CMMS] Error processing message:',e);}});}return true;})(); true;`;
+  return `${getForceDarkScript()}(function(){window.__rn_injected=true;console.log('[RN-CMMS] injectedJavaScriptBeforeContentLoaded running');console.log('[RN-CMMS] Bootstrap token available before load:', ${hasBootstrapToken});${buildAuthDiscoveryScript()}${bootstrapScript}if(window.addEventListener){window.addEventListener('message',function(ev){try{var d=typeof ev.data==='string'?JSON.parse(ev.data):ev.data;console.log('[RN-CMMS] Received message:',d);if(d&&d.type==='CMMS_TOKEN_READY'&&d.token){console.log('[RN-CMMS] Token received:',String(d.token).substring(0,20)+'...');try{localStorage.setItem('${CMMS_AUTH_STORAGE_KEY}',d.token);localStorage.setItem('${LEGACY_AUTH_STORAGE_KEY}',d.token);sessionStorage.setItem('${CMMS_AUTH_STORAGE_KEY}',d.token);sessionStorage.setItem('${LEGACY_AUTH_STORAGE_KEY}',d.token);console.log('[RN-CMMS] Token saved to localStorage/sessionStorage');window.dispatchEvent(new Event('cmms-auth-token-change'));}catch(e){console.error('[RN-CMMS] Failed to save to localStorage:',e);}}}catch(e){console.error('[RN-CMMS] Error processing message:',e);}});}return true;})(); true;`;
 }
 
 export default function WebviewScreen() {
@@ -397,6 +600,7 @@ export default function WebviewScreen() {
   const [bootstrapAuthToken, setBootstrapAuthToken] = useState<string | null>(null);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pushSyncRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushSyncInFlightRef = useRef(false);
   const pushJwtWaitRef = useRef<Promise<string | null> | null>(null);
   const pushJwtResolveRef = useRef<((token: string | null) => void) | null>(null);
   const isMountedRef = useRef(true);
@@ -446,7 +650,10 @@ export default function WebviewScreen() {
       if (typeof webview.injectJavaScript === "function") {
         console.log("[WebView] Injecting CMMS token into WebView:", `${token.substring(0, 24)}...`);
         webview.injectJavaScript(buildCmmsTokenInjectionScript(token));
+        return;
       }
+
+      console.log("[WebView] No supported WebView method available for CMMS token delivery");
     } catch (err) {
       console.log("[WebView] Failed JS token injection:", err);
     }
@@ -474,17 +681,18 @@ export default function WebviewScreen() {
     }
   }
 
-  async function waitForLegacyJwtToken(SecureStore: any) {
+  async function waitForLegacyJwtToken() {
     if (pushJwtWaitRef.current) {
       return pushJwtWaitRef.current;
     }
 
-    const tokenRaw = await SecureStore.getItemAsync(LEGACY_AUTH_STORAGE_KEY);
-    const token = typeof tokenRaw === "string" ? tokenRaw.trim() : "";
+    const token = await readStoredAuthToken(true);
     if (token) {
-      console.log("[Push] Legacy JWT became available:", `${token.substring(0, 24)}...`);
+      console.log("[Push] Auth token became available:", `${token.substring(0, 24)}...`);
       return token;
     }
+
+    console.log("[Push] Auth token is still pending 2FA; waiting for final token");
 
     pushJwtWaitRef.current = new Promise<string | null>((resolve) => {
       pushJwtResolveRef.current = resolve;
@@ -493,7 +701,7 @@ export default function WebviewScreen() {
       pushJwtResolveRef.current = null;
     });
 
-    console.log("[Push] Waiting for legacy JWT before push sync...");
+    console.log("[Push] Waiting for auth token before push sync...");
     return pushJwtWaitRef.current;
   }
 
@@ -539,42 +747,14 @@ export default function WebviewScreen() {
   }
 
   async function readValidStoredToken() {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const ss = require("expo-secure-store");
-      const cmmsRaw = await ss.getItemAsync(CMMS_AUTH_STORAGE_KEY);
-      const legacyRaw = await ss.getItemAsync(LEGACY_AUTH_STORAGE_KEY);
-      const tokenRaw = cmmsRaw ?? legacyRaw;
-      const token = typeof tokenRaw === "string" ? tokenRaw.trim() : "";
-
-      console.log(
-        "[WebView] Read stored token:",
-        token ? `${token.substring(0, 24)}...` : "none",
-        "from secure storage"
-      );
-      console.log("[WebView] SecureStore lookup order:", CMMS_AUTH_STORAGE_KEY, "then", LEGACY_AUTH_STORAGE_KEY);
-
-      if (!token) return null;
-
-      const expiry = getTokenExpiry(token);
-      if (expiry && expiry <= Date.now()) {
-        console.log("[WebView] Stored token already expired, clearing");
-        await ss.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
-        await ss.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
-        return null;
-      }
-
-      if (cmmsRaw) {
-        await ss.setItemAsync(CMMS_AUTH_STORAGE_KEY, token).catch(() => {});
-      } else if (legacyRaw) {
-        await ss.setItemAsync(LEGACY_AUTH_STORAGE_KEY, token).catch(() => {});
-      }
-
-      return token;
-    } catch (err) {
-      console.log("[WebView] Failed to read token from SecureStore:", err);
-      return null;
-    }
+    const token = await readStoredAuthToken(false);
+    console.log(
+      "[WebView] Read stored token:",
+      token ? `${token.substring(0, 24)}...` : "none",
+      "from secure storage"
+    );
+    console.log("[WebView] SecureStore lookup order:", CMMS_AUTH_STORAGE_KEY, "then", LEGACY_AUTH_STORAGE_KEY);
+    return token;
   }
 
   async function restoreSavedUrlFromStorage() {
@@ -819,6 +999,12 @@ export default function WebviewScreen() {
   }
 
   async function syncExpoPushTokenToBackend(authToken?: string | null) {
+    if (pushSyncInFlightRef.current) {
+      console.log("[Push] Push sync already in progress; skipping duplicate request");
+      return;
+    }
+
+    pushSyncInFlightRef.current = true;
     try {
       // Runtime requires keep the bundle stable even if the package is temporarily missing.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -828,28 +1014,31 @@ export default function WebviewScreen() {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const AsyncStorageModule = require("@react-native-async-storage/async-storage");
       const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const SecureStore = require("expo-secure-store");
 
       if (!Device?.isDevice) {
         console.log("[Push] Physical device required for Expo push tokens");
         return;
       }
 
-      let storedAuthToken = authToken ?? (await SecureStore.getItemAsync(LEGACY_AUTH_STORAGE_KEY));
+      let storedAuthToken = authToken ?? (await readValidStoredToken());
       console.log(
-        "[Push] Legacy JWT selected for push sync:",
+        "[Push] Auth token selected for push sync:",
         storedAuthToken ? `${String(storedAuthToken).substring(0, 24)}...` : "none",
         authToken ? "from argument" : "from SecureStore"
       );
+      if (storedAuthToken && isPendingAuthToken(storedAuthToken)) {
+        console.log("[Push] Auth token is 2FA pending; waiting for the final token before push sync");
+        storedAuthToken = null;
+      }
+
       if (!storedAuthToken) {
-        storedAuthToken = await waitForLegacyJwtToken(SecureStore);
+        storedAuthToken = await waitForLegacyJwtToken();
         console.log(
-          "[Push] Legacy JWT selected for push sync after wait:",
+          "[Push] Auth token selected for push sync after wait:",
           storedAuthToken ? `${String(storedAuthToken).substring(0, 24)}...` : "none"
         );
         if (!storedAuthToken) {
-          console.log("[Push] Legacy JWT wait ended without a token; push sync paused");
+          console.log("[Push] Auth token wait ended without a token; push sync paused");
           return;
         }
       }
@@ -884,7 +1073,8 @@ export default function WebviewScreen() {
 
       const projectId =
         Constants.easConfig?.projectId ??
-        Constants.expoConfig?.extra?.eas?.projectId;
+        Constants.expoConfig?.extra?.eas?.projectId ??
+        "f446f3e2-106e-490e-aae2-62e3ce27a086";
 
       const pushTokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
       const expoPushToken = pushTokenResponse?.data;
@@ -939,6 +1129,8 @@ export default function WebviewScreen() {
       console.log("[Push] Expo push token synced to backend");
     } catch (err) {
       console.log("[Push] Error syncing Expo push token:", err);
+    } finally {
+      pushSyncInFlightRef.current = false;
     }
   }
 
@@ -1089,6 +1281,7 @@ export default function WebviewScreen() {
                 tokenType === "auth_token" ||
                 tokenType === "cmms_token" ||
                 tokenType === "cmms_auth_token" ||
+                tokenType === "cmms_token_ready" ||
                 tokenType === "tokenreceived" ||
                 tokenType === "token_received" ||
                 tokenType === ""
@@ -1098,7 +1291,9 @@ export default function WebviewScreen() {
               console.log("[WebView] Page token length:", candidateToken.length);
               console.log("[WebView] Auth token source:", data.source || data.type || "unknown");
 
-              const expiryMs = getTokenExpiry(candidateToken);
+              const tokenInfo = decodeJwt(candidateToken) as any;
+              const isPendingTwoFactor = tokenInfo?.scope === "2fa_pending";
+              const expiryMs = isPendingTwoFactor ? null : getTokenExpiry(candidateToken);
               if (expiryMs && expiryMs <= Date.now()) {
                 console.log("[WebView] ⛔ Ignoring expired auth token from page");
                 clearWebViewAuthState();
@@ -1106,7 +1301,11 @@ export default function WebviewScreen() {
                 return;
               }
 
-              scheduleTokenExpiry(candidateToken);
+              if (!isPendingTwoFactor) {
+                scheduleTokenExpiry(candidateToken);
+              } else {
+                console.log("[WebView] Temporary 2FA token received; skipping expiry handling and push sync");
+              }
               
               // Save the token into the matching secure storage key so CMMS auth and legacy push auth stay separate.
               try {
@@ -1114,28 +1313,31 @@ export default function WebviewScreen() {
                 // eslint-disable-next-line @typescript-eslint/no-var-requires
                 const ss = require("expo-secure-store");
                 const source = typeof data.source === "string" ? data.source.toLowerCase() : "";
-                const looksLegacy = source.includes("jwt") || source.includes("legacy") || data.type === "TOKEN";
-                const looksCmms = source.includes("cmms_auth_token") || source.includes("cmms");
-                const saveLegacy = looksLegacy || !looksCmms;
-                const saveCmms = looksCmms || !looksLegacy;
-                console.log("[WebView] Saving auth token to SecureStore keys:", { saveLegacy, saveCmms });
+                const isNetworkToken = source.includes("fetch-response") || source.includes("xhr-response");
+                const isLegacySource = source.includes("jwt") || source.includes("legacy") || isNetworkToken;
+                const isCmmsSource = source.includes("cmms");
+                const isGenericAuth =
+                  tokenType === "auth" ||
+                  tokenType === "token" ||
+                  tokenType === "token_ready" ||
+                  tokenType === "cmms_token_ready" ||
+                  tokenType === "";
+                const saveLegacy = !isPendingTwoFactor && (isLegacySource || (isGenericAuth && !isCmmsSource));
+                const saveCmms = isCmmsSource || isNetworkToken || isGenericAuth;
+                console.log("[WebView] Saving auth token to SecureStore keys:", { saveLegacy, saveCmms, source });
                 Promise.all([
                   saveLegacy ? ss.setItemAsync(LEGACY_AUTH_STORAGE_KEY, candidateToken) : Promise.resolve(),
                   saveCmms ? ss.setItemAsync(CMMS_AUTH_STORAGE_KEY, candidateToken) : Promise.resolve(),
                 ]).then(() => {
-                  if (saveCmms) {
-                    setBootstrapAuthToken(candidateToken);
-                  }
-                  clearPushSyncRetry();
-                  if (saveLegacy) {
+                  setBootstrapAuthToken(candidateToken);
+                  if (!isPendingTwoFactor) {
+                    clearPushSyncRetry();
                     resolveLegacyJwtWait(candidateToken);
                   }
                   console.log("[WebView] ✅ Token SAVED to SecureStore successfully");
                   void restoreSavedUrlFromStorage();
-                  if (saveLegacy) {
+                  if (!isPendingTwoFactor) {
                     void syncExpoPushTokenToBackend(candidateToken);
-                  } else {
-                    void syncExpoPushTokenToBackend();
                   }
                 }).catch((err: any) => {
                   console.log("[WebView] ❌ Failed saving token to SecureStore:", err);

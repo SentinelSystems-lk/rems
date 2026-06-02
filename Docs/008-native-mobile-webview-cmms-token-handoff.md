@@ -25,22 +25,33 @@ Make the mobile WebView load Work Orders as fast as the browser by ensuring the 
 Use both of these paths:
 
 - `window.localStorage.setItem("cmms_auth_token", token)`
-- a `postMessage` event to notify the web app that the token is ready
+- a native `injectJavaScript(...)` call to notify the page that the token is ready
 
 This is important because:
 
 - `localStorage` persists across refreshes
-- the message makes the UI update immediately without waiting for a reload
+- the injected script can fire both `storage` and `cmms-auth-token-change` events so the React app updates immediately
 
 ## Example WebView Injection
 
-If your native app can inject JavaScript, use a payload like this:
+If your native app controls the `WebView` ref, use a payload like this:
 
 ```js
-window.localStorage.setItem("cmms_auth_token", token);
-window.dispatchEvent(new Event("cmms-auth-token-change"));
-window.postMessage({ type: "CMMS_TOKEN_READY" }, "*");
+webviewRef.current.injectJavaScript(`
+  window.localStorage.setItem("cmms_auth_token", token);
+  window.dispatchEvent(new StorageEvent("storage", {
+    key: "cmms_auth_token",
+    newValue: token,
+    oldValue: null,
+    storageArea: window.localStorage,
+    url: window.location.href
+  }));
+  window.dispatchEvent(new Event("cmms-auth-token-change"));
+  true;
+`);
 ```
+
+If you need a fallback for early boot, you can still inject JavaScript to write the token into `localStorage` and dispatch `storage` and `cmms-auth-token-change`.
 
 ## Performance Checklist
 
@@ -63,4 +74,3 @@ window.postMessage({ type: "CMMS_TOKEN_READY" }, "*");
 - The Work Orders list should be server-scoped to the assigned user.
 - The current CMMS user profile is still useful for permissions, labels, and detail actions.
 - If the native app injects the token early, the web view should feel close to instant.
-

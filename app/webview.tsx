@@ -13,6 +13,7 @@ const HEADER_BG_COLOR = "#0b0b0b";
 const APP_URL = "http://localhost:5173/";
 // const APP_URL = "https://7s6i6.sentinel.lk/";
 const STORAGE_SCOPE = "monitoring";
+const MAX_JS_TIMEOUT_MS = 2147483647;
 
 function getSourceUri() {
   return APP_URL;
@@ -151,6 +152,51 @@ function addCacheBuster(url: string, version: string) {
   }
 }
 
+function buildTokenInjectionScript(token: string) {
+  const safeToken = JSON.stringify(token);
+
+  return `(function() {
+    try {
+      var token = ${safeToken};
+      if (!token) return;
+
+      try {
+        localStorage.setItem('jwt', token);
+        localStorage.setItem('JWT', token);
+      } catch (e) {}
+
+      try {
+        document.cookie = 'jwt=' + encodeURIComponent(token) + '; path=/; SameSite=None; Secure';
+      } catch (e) {}
+
+      try {
+        window.dispatchEvent(new CustomEvent('rn-auth', { detail: token }));
+      } catch (e) {}
+    } catch (e) {}
+  })(); true;`;
+}
+
+function buildClearAuthInjectionScript() {
+  return `(function() {
+    try {
+      try {
+        localStorage.removeItem('jwt');
+        localStorage.removeItem('JWT');
+      } catch (e) {}
+
+      try {
+        sessionStorage.removeItem('jwt');
+        sessionStorage.removeItem('JWT');
+      } catch (e) {}
+
+      try {
+        document.cookie = 'jwt=; Max-Age=0; path=/; SameSite=None; Secure';
+        document.cookie = 'JWT=; Max-Age=0; path=/; SameSite=None; Secure';
+      } catch (e) {}
+    } catch (e) {}
+  })(); true;`;
+}
+
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
   const router = useRouter();
@@ -168,6 +214,7 @@ export default function WebviewScreen() {
   const [statusBarStyle, setStatusBarStyle] = useState<StatusBarStyle>(systemScheme === "dark" ? "light" : "dark");
   const [preventRemove, setPreventRemove] = useState(true);
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
+  const [isSessionHydrated, setIsSessionHydrated] = useState(false);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const versionProbeRef = useRef<Promise<void> | null>(null);
   const restoreUrlRef = useRef<Promise<void> | null>(null);
@@ -204,6 +251,103 @@ export default function WebviewScreen() {
     SplashScreen.hideAsync().catch(() => {});
   }, []);
 
+  function deliverTokenToWebView(token: string) {
+    const webview = webviewRef.current;
+    if (!webview) {
+      console.log("[WebView] WebView ref not ready for token delivery");
+      return;
+    }
+
+    try {
+      if (typeof webview.injectJavaScript === "function") {
+        webview.injectJavaScript(buildTokenInjectionScript(token));
+      }
+    } catch (err) {
+      console.log("[WebView] Failed JS token injection:", err);
+    }
+
+    try {
+      if (typeof webview.postMessage === "function") {
+        webview.postMessage(JSON.stringify({ type: "auth", token }));
+      }
+    } catch (err) {
+      console.log("[WebView] Failed postMessage token delivery:", err);
+    }
+  }
+
+  function clearWebViewAuthState() {
+    const webview = webviewRef.current;
+    if (!webview) {
+      return;
+    }
+
+    try {
+      if (typeof webview.injectJavaScript === "function") {
+        webview.injectJavaScript(buildClearAuthInjectionScript());
+      }
+    } catch (err) {
+      console.log("[WebView] Failed to clear WebView auth state:", err);
+    }
+  }
+
+  function scheduleTokenExpiry(token: string) {
+    if (tokenExpiryRef.current) {
+      clearTimeout(tokenExpiryRef.current);
+      tokenExpiryRef.current = null;
+    }
+
+    const expiryMs = getTokenExpiry(token);
+    if (!expiryMs) {
+      console.log("[WebView] ⚠️ Could not decode token expiry - no automatic clearing");
+      return;
+    }
+
+    const scheduleNextCheck = () => {
+      const remainingMs = expiryMs - Date.now();
+      if (remainingMs <= 0) {
+        console.log("[WebView] ⏱️ Token has EXPIRED - clearing storage");
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const ss = require("expo-secure-store");
+          ss.deleteItemAsync("jwt").catch(() => {});
+        } catch {}
+        void exitToHome();
+        return;
+      }
+
+      const delay = Math.min(remainingMs, MAX_JS_TIMEOUT_MS);
+      tokenExpiryRef.current = setTimeout(scheduleNextCheck, delay);
+    };
+
+    const expiryDate = new Date(expiryMs);
+    const expiresInSeconds = Math.round((expiryMs - Date.now()) / 1000);
+    console.log(`[WebView] ⏰ Token expires in ${expiresInSeconds}s at ${expiryDate.toLocaleString()}`);
+    scheduleNextCheck();
+  }
+
+  async function readValidStoredToken() {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const ss = require("expo-secure-store");
+      const tokenRaw = await ss.getItemAsync("jwt");
+      const token = typeof tokenRaw === "string" ? tokenRaw.trim() : "";
+
+      if (!token) return null;
+
+      const expiry = getTokenExpiry(token);
+      if (expiry && expiry <= Date.now()) {
+        console.log("[WebView] Stored token already expired, clearing");
+        await ss.deleteItemAsync("jwt").catch(() => {});
+        return null;
+      }
+
+      return token;
+    } catch (err) {
+      console.log("[WebView] Failed to read token from SecureStore:", err);
+      return null;
+    }
+  }
+
   async function restoreSavedUrlFromStorage() {
     if (normalizedProvidedUrlRef.current) return;
     if (currentUrlRef.current && currentUrlRef.current !== sourceUriRef.current) return;
@@ -219,21 +363,10 @@ export default function WebviewScreen() {
           return;
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const SecureStore = require("expo-secure-store");
         const storageKey = `webview_url_${STORAGE_SCOPE}`;
-
-        const token = await SecureStore.getItemAsync("jwt");
+        const token = await readValidStoredToken();
         if (!token) {
           console.log("[WebView] No token found, clearing saved URL");
-          await AsyncStorage.removeItem(storageKey).catch(() => {});
-          return;
-        }
-
-        const expiry = getTokenExpiry(token);
-        const isExpired = expiry && new Date(expiry) < new Date();
-        if (isExpired) {
-          console.log("[WebView] Token expired, clearing saved URL");
           await AsyncStorage.removeItem(storageKey).catch(() => {});
           return;
         }
@@ -257,8 +390,20 @@ export default function WebviewScreen() {
   }
 
   useEffect(() => {
-    void restoreSavedUrlFromStorage();
-  }, [currentUrl, normalizedProvidedUrl, sourceUri]);
+    let mounted = true;
+
+    (async () => {
+      await restoreSavedUrlFromStorage();
+      await postAuthToken();
+      if (mounted) setIsSessionHydrated(true);
+    })().catch(() => {
+      if (mounted) setIsSessionHydrated(true);
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [normalizedProvidedUrl, sourceUri]);
 
   async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
     if (versionProbeRef.current) {
@@ -314,6 +459,8 @@ export default function WebviewScreen() {
 
   async function clearSavedLaunchState() {
     try {
+      clearWebViewAuthState();
+
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const AsyncStorageModule = require("@react-native-async-storage/async-storage");
       const AsyncStorage = AsyncStorageModule?.default || AsyncStorageModule;
@@ -387,29 +534,15 @@ export default function WebviewScreen() {
 
   async function postAuthToken() {
     try {
-      let token: string | null = null;
-      try {
-        // require at runtime to avoid static module resolution errors if package isn't installed yet
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const ss = require("expo-secure-store");
-        token = await ss.getItemAsync("jwt");
-        if (token) {
-          console.log("[WebView] Token found in SecureStore:", token.substring(0, 20) + "...");
-        } else {
-          console.log("[WebView] No token found in SecureStore");
-        }
-      } catch (err) {
-        console.log("[WebView] Failed to read from SecureStore:", err);
-        token = null;
-      }
-      if (token && webviewRef.current && typeof webviewRef.current.postMessage === "function") {
-        console.log("[WebView] Posting token to WebView...");
-        webviewRef.current.postMessage(JSON.stringify({ type: "auth", token }));
-      } else if (!token) {
+      const token = await readValidStoredToken();
+
+      if (!token) {
         console.log("[WebView] No token to post");
-      } else {
-        console.log("[WebView] WebView ref not ready");
+        return;
       }
+
+      scheduleTokenExpiry(token);
+      deliverTokenToWebView(token);
     } catch (err) {
       console.log("[WebView] Error in postAuthToken:", err);
     }
@@ -546,6 +679,14 @@ export default function WebviewScreen() {
     };
   }, []);
 
+  if (!isSessionHydrated) {
+    return (
+      <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
+        <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={["top", "bottom"]}>
       <StatusBar style={statusBarStyle} backgroundColor={bgColor} translucent={false} />
@@ -559,6 +700,12 @@ export default function WebviewScreen() {
           if (nextUrl && nextUrl !== sourceUri && nextUrl !== currentUrl) {
             setCurrentUrl(nextUrl);
           }
+        }}
+        onLoadStart={() => {
+          void postAuthToken();
+        }}
+        onLoadEnd={() => {
+          void postAuthToken();
         }}
         cacheEnabled={true}
         incognito={false}
@@ -770,32 +917,16 @@ export default function WebviewScreen() {
 
             if ((data.type === "auth" || data.type === "TOKEN") && typeof data.token === "string") {
               console.log("[WebView] 🔐 AUTH TOKEN RECEIVED from page:", data.token.substring(0, 30) + "...");
-              
-              // Clear any existing expiry timer
-              if (tokenExpiryRef.current) {
-                clearTimeout(tokenExpiryRef.current);
-              }
-              
-              // Decode JWT and get expiry time
+
               const expiryMs = getTokenExpiry(data.token);
-              const now = Date.now();
-              if (expiryMs) {
-                const expiresInSeconds = Math.round((expiryMs - now) / 1000);
-                const expiryDate = new Date(expiryMs);
-                console.log(`[WebView] ⏰ Token expires in ${expiresInSeconds}s at ${expiryDate.toLocaleString()}`);
-                
-                // Schedule token clearing when it expires
-                tokenExpiryRef.current = setTimeout(() => {
-                  console.log("[WebView] ⏱️ Token has EXPIRED - clearing storage");
-                  try {
-                    const ss = require("expo-secure-store");
-                    ss.setItemAsync("jwt", "").catch(() => {});
-                  } catch {}
-                  void exitToHome();
-                }, expiryMs - now);
-              } else {
-                console.log("[WebView] ⚠️ Could not decode token expiry - no automatic clearing");
+              if (expiryMs && expiryMs <= Date.now()) {
+                console.log("[WebView] ⛔ Ignoring expired auth token from page");
+                clearWebViewAuthState();
+                void exitToHome();
+                return;
               }
+
+              scheduleTokenExpiry(data.token);
               
               // Save token coming from the web page into secure storage so RN can reuse it
               try {

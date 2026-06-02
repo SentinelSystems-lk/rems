@@ -4,8 +4,8 @@ import { useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 
-const APP_URL = "http://localhost:5173/";
-// const APP_URL = "https://7s6i6.sentinel.lk/";
+// const APP_URL = "http://localhost:5173/";
+const APP_URL = "https://7s6i6.sentinel.lk/";
 
 function getVersionFileUrl() {
   try {
@@ -58,21 +58,28 @@ export default function Home() {
       const versionUrl = getVersionFileUrl();
 
       try {
+        console.log("[Home] Bootstrap started");
+        console.log("[Home] Version file URL:", versionUrl);
         const AsyncStorage = await loadStorage();
         const siteVersion = await readVersionFile(versionUrl);
 
         if (siteVersion) {
+          console.log("[Home] Site version detected:", siteVersion);
           const previousVersion = await AsyncStorage.getItem(versionKey);
+          console.log("[Home] Previous stored site version:", previousVersion || "none");
           if (previousVersion !== siteVersion) {
             await AsyncStorage.setItem(versionKey, siteVersion);
+            console.log("[Home] Stored latest site version");
           }
         }
 
+        console.log("[Home] Navigating to WebView");
         router.replace("/webview");
         if (!cancelled) {
           await SplashScreen.hideAsync().catch(() => {});
         }
       } catch {
+        console.log("[Home] Bootstrap failed, still navigating to WebView");
         router.replace("/webview");
         if (!cancelled) {
           await SplashScreen.hideAsync().catch(() => {});

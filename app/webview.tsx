@@ -10,9 +10,11 @@ import * as SplashScreen from "expo-splash-screen";
 import { getBackendUrl } from "./config";
 
 const HEADER_BG_COLOR = "#0b0b0b";
-const APP_URL = "http://localhost:5173/";
-// const APP_URL = "https://7s6i6.sentinel.lk/";
+// const APP_URL = "http://localhost:5173/";
+const APP_URL = "https://7s6i6.sentinel.lk/";
 const STORAGE_SCOPE = "monitoring";
+const CMMS_AUTH_STORAGE_KEY = "cmms_auth_token";
+const LEGACY_AUTH_STORAGE_KEY = "jwt";
 const MAX_JS_TIMEOUT_MS = 2147483647;
 
 function getSourceUri() {
@@ -152,7 +154,7 @@ function addCacheBuster(url: string, version: string) {
   }
 }
 
-function buildTokenInjectionScript(token: string) {
+function buildCmmsTokenInjectionScript(token: string) {
   const safeToken = JSON.stringify(token);
 
   return `(function() {
@@ -161,40 +163,217 @@ function buildTokenInjectionScript(token: string) {
       if (!token) return;
 
       try {
-        localStorage.setItem('jwt', token);
-        localStorage.setItem('JWT', token);
+        localStorage.setItem('${CMMS_AUTH_STORAGE_KEY}', token);
       } catch (e) {}
 
       try {
-        document.cookie = 'jwt=' + encodeURIComponent(token) + '; path=/; SameSite=None; Secure';
+        window.dispatchEvent(new Event('cmms-auth-token-change'));
       } catch (e) {}
 
       try {
-        window.dispatchEvent(new CustomEvent('rn-auth', { detail: token }));
+        window.postMessage(JSON.stringify({ type: 'CMMS_TOKEN_READY' }), '*');
       } catch (e) {}
     } catch (e) {}
   })(); true;`;
 }
 
-function buildClearAuthInjectionScript() {
+function buildClearCmmsAuthInjectionScript() {
   return `(function() {
     try {
       try {
-        localStorage.removeItem('jwt');
-        localStorage.removeItem('JWT');
+        localStorage.removeItem('${CMMS_AUTH_STORAGE_KEY}');
+        localStorage.removeItem('${LEGACY_AUTH_STORAGE_KEY}');
       } catch (e) {}
 
       try {
-        sessionStorage.removeItem('jwt');
-        sessionStorage.removeItem('JWT');
+        sessionStorage.removeItem('${CMMS_AUTH_STORAGE_KEY}');
+        sessionStorage.removeItem('${LEGACY_AUTH_STORAGE_KEY}');
       } catch (e) {}
 
       try {
-        document.cookie = 'jwt=; Max-Age=0; path=/; SameSite=None; Secure';
-        document.cookie = 'JWT=; Max-Age=0; path=/; SameSite=None; Secure';
+        document.cookie = '${CMMS_AUTH_STORAGE_KEY}=; Max-Age=0; path=/; SameSite=None; Secure';
+        document.cookie = '${LEGACY_AUTH_STORAGE_KEY}=; Max-Age=0; path=/; SameSite=None; Secure';
       } catch (e) {}
     } catch (e) {}
   })(); true;`;
+}
+
+function buildAuthDiscoveryScript() {
+  return `(function() {
+    try {
+      var lastPostedToken = null;
+
+      function looksLikeJwt(value) {
+        return typeof value === 'string' && /^[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}$/.test(value.trim());
+      }
+
+      function looksLikeAuthValue(value) {
+        if (typeof value !== 'string') return false;
+        var trimmed = value.trim();
+        if (!trimmed) return false;
+        return looksLikeJwt(trimmed) || (trimmed.length > 40 && trimmed.indexOf('.') !== -1);
+      }
+
+      function postToken(token, source) {
+        try {
+          if (!looksLikeAuthValue(token)) return;
+          if (lastPostedToken === token) return;
+          lastPostedToken = token;
+          console.log('[RN-CMMS] Auth token discovered from ' + source + ':', String(token).substring(0, 20) + '...');
+          try { localStorage.setItem('${CMMS_AUTH_STORAGE_KEY}', token); } catch (e) {}
+          try { sessionStorage.setItem('${CMMS_AUTH_STORAGE_KEY}', token); } catch (e) {}
+          try { localStorage.setItem('${LEGACY_AUTH_STORAGE_KEY}', token); } catch (e) {}
+          try { sessionStorage.setItem('${LEGACY_AUTH_STORAGE_KEY}', token); } catch (e) {}
+          try { window.dispatchEvent(new Event('cmms-auth-token-change')); } catch (e) {}
+          try {
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: token, source: source }));
+          } catch (e) {}
+        } catch (e) {}
+      }
+
+      function scanStorage(storage, label) {
+        try {
+          if (!storage) return;
+
+          var directKeys = ['${LEGACY_AUTH_STORAGE_KEY}', '${CMMS_AUTH_STORAGE_KEY}'];
+          for (var i = 0; i < directKeys.length; i++) {
+            var directValue = storage.getItem(directKeys[i]);
+            if (looksLikeAuthValue(directValue)) {
+              postToken(directValue, label + ':' + directKeys[i]);
+              return;
+            }
+          }
+
+          for (var index = 0; index < storage.length; index++) {
+            var key = storage.key(index);
+            if (!key) continue;
+            var value = storage.getItem(key);
+            if (looksLikeAuthValue(value)) {
+              postToken(value, label + ':' + key);
+              return;
+            }
+          }
+        } catch (e) {}
+      }
+
+      function scanCookies() {
+        try {
+          var cookieParts = document.cookie ? document.cookie.split(/;\\s*/) : [];
+          for (var i = 0; i < cookieParts.length; i++) {
+            var part = cookieParts[i];
+            var eqIndex = part.indexOf('=');
+            if (eqIndex === -1) continue;
+            var key = part.substring(0, eqIndex);
+            var value = decodeURIComponent(part.substring(eqIndex + 1));
+            if (key === '${LEGACY_AUTH_STORAGE_KEY}' && looksLikeAuthValue(value)) {
+              postToken(value, 'cookie:' + key);
+              return;
+            }
+          }
+
+          for (var j = 0; j < cookieParts.length; j++) {
+            var cmmsPart = cookieParts[j];
+            var cmmsEq = cmmsPart.indexOf('=');
+            if (cmmsEq === -1) continue;
+            var cmmsKey = cmmsPart.substring(0, cmmsEq);
+            var cmmsValue = decodeURIComponent(cmmsPart.substring(cmmsEq + 1));
+            if (cmmsKey === '${CMMS_AUTH_STORAGE_KEY}' && looksLikeAuthValue(cmmsValue)) {
+              postToken(cmmsValue, 'cookie:' + cmmsKey);
+              return;
+            }
+          }
+        } catch (e) {}
+      }
+
+      function scanAll() {
+        scanStorage(window.localStorage, 'localStorage');
+        scanStorage(window.sessionStorage, 'sessionStorage');
+        scanCookies();
+      }
+
+      scanAll();
+      window.addEventListener('storage', scanAll);
+      window.addEventListener('focus', scanAll);
+      document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') scanAll();
+      });
+      window.addEventListener('message', function(ev) {
+        try {
+          var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+          if (!d || typeof d !== 'object') return;
+          var candidates = [d.token, d.jwt, d.access_token, d.authToken, d.auth_token, d.legacy_jwt, d.cmms_auth_token];
+          for (var i = 0; i < candidates.length; i++) {
+            if (looksLikeAuthValue(candidates[i])) {
+              postToken(candidates[i], 'window.message:' + (d.type || 'unknown'));
+              return;
+            }
+          }
+        } catch (e) {}
+      });
+      setInterval(scanAll, 1000);
+    } catch (e) {}
+  })(); true;`;
+}
+
+function extractTokenFromPayload(value: unknown): string {
+  const seen = new Set<unknown>();
+
+  function walk(input: unknown): string {
+    if (!input || typeof input !== "object") {
+      return "";
+    }
+
+    if (seen.has(input)) {
+      return "";
+    }
+    seen.add(input);
+
+    if (Array.isArray(input)) {
+      for (const item of input) {
+        const token = walk(item);
+        if (token) return token;
+      }
+      return "";
+    }
+
+    const record = input as Record<string, unknown>;
+    const directKeys = [
+      "token",
+      "jwt",
+      "access_token",
+      "authToken",
+      "auth_token",
+      "legacy_jwt",
+      "cmms_auth_token",
+    ];
+
+    for (const key of directKeys) {
+      const candidate = record[key];
+      if (typeof candidate === "string" && candidate.length > 20 && candidate.includes(".")) {
+        return candidate;
+      }
+    }
+
+    for (const nested of Object.values(record)) {
+      const token = walk(nested);
+      if (token) return token;
+    }
+
+    return "";
+  }
+
+  if (typeof value === "string" && value.length > 20 && value.includes(".")) {
+    return value;
+  }
+
+  return walk(value);
+}
+
+function buildBeforeContentJavaScript(token: string | null) {
+  const bootstrapScript = token ? buildCmmsTokenInjectionScript(token) : "true;";
+  const hasBootstrapToken = Boolean(token);
+
+  return `${getForceDarkScript()}(function(){window.__rn_injected=true;console.log('[RN-CMMS] injectedJavaScriptBeforeContentLoaded running');console.log('[RN-CMMS] Bootstrap token available before load:', ${hasBootstrapToken});${buildAuthDiscoveryScript()}${bootstrapScript}if(window.addEventListener){window.addEventListener('message',function(ev){try{var d=typeof ev.data==='string'?JSON.parse(ev.data):ev.data;console.log('[RN-CMMS] Received message:',d);if(d&&d.type==='CMMS_TOKEN_READY'&&d.token){console.log('[RN-CMMS] Token received:',String(d.token).substring(0,20)+'...');try{localStorage.setItem('${CMMS_AUTH_STORAGE_KEY}',d.token);console.log('[RN-CMMS] Token saved to localStorage');window.dispatchEvent(new Event('cmms-auth-token-change'));}catch(e){console.error('[RN-CMMS] Failed to save to localStorage:',e);}}}catch(e){console.error('[RN-CMMS] Error processing message:',e);}});}return true;})(); true;`;
 }
 
 export default function WebviewScreen() {
@@ -215,7 +394,12 @@ export default function WebviewScreen() {
   const [preventRemove, setPreventRemove] = useState(true);
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const [isSessionHydrated, setIsSessionHydrated] = useState(false);
+  const [bootstrapAuthToken, setBootstrapAuthToken] = useState<string | null>(null);
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushSyncRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushJwtWaitRef = useRef<Promise<string | null> | null>(null);
+  const pushJwtResolveRef = useRef<((token: string | null) => void) | null>(null);
+  const isMountedRef = useRef(true);
   const versionProbeRef = useRef<Promise<void> | null>(null);
   const restoreUrlRef = useRef<Promise<void> | null>(null);
   const currentUrlRef = useRef(currentUrl);
@@ -260,18 +444,11 @@ export default function WebviewScreen() {
 
     try {
       if (typeof webview.injectJavaScript === "function") {
-        webview.injectJavaScript(buildTokenInjectionScript(token));
+        console.log("[WebView] Injecting CMMS token into WebView:", `${token.substring(0, 24)}...`);
+        webview.injectJavaScript(buildCmmsTokenInjectionScript(token));
       }
     } catch (err) {
       console.log("[WebView] Failed JS token injection:", err);
-    }
-
-    try {
-      if (typeof webview.postMessage === "function") {
-        webview.postMessage(JSON.stringify({ type: "auth", token }));
-      }
-    } catch (err) {
-      console.log("[WebView] Failed postMessage token delivery:", err);
     }
   }
 
@@ -283,11 +460,46 @@ export default function WebviewScreen() {
 
     try {
       if (typeof webview.injectJavaScript === "function") {
-        webview.injectJavaScript(buildClearAuthInjectionScript());
+        webview.injectJavaScript(buildClearCmmsAuthInjectionScript());
       }
     } catch (err) {
       console.log("[WebView] Failed to clear WebView auth state:", err);
     }
+  }
+
+  function clearPushSyncRetry() {
+    if (pushSyncRetryRef.current) {
+      clearTimeout(pushSyncRetryRef.current);
+      pushSyncRetryRef.current = null;
+    }
+  }
+
+  async function waitForLegacyJwtToken(SecureStore: any) {
+    if (pushJwtWaitRef.current) {
+      return pushJwtWaitRef.current;
+    }
+
+    const tokenRaw = await SecureStore.getItemAsync(LEGACY_AUTH_STORAGE_KEY);
+    const token = typeof tokenRaw === "string" ? tokenRaw.trim() : "";
+    if (token) {
+      console.log("[Push] Legacy JWT became available:", `${token.substring(0, 24)}...`);
+      return token;
+    }
+
+    pushJwtWaitRef.current = new Promise<string | null>((resolve) => {
+      pushJwtResolveRef.current = resolve;
+    }).finally(() => {
+      pushJwtWaitRef.current = null;
+      pushJwtResolveRef.current = null;
+    });
+
+    console.log("[Push] Waiting for legacy JWT before push sync...");
+    return pushJwtWaitRef.current;
+  }
+
+  function resolveLegacyJwtWait(token: string | null) {
+    if (!pushJwtResolveRef.current) return;
+    pushJwtResolveRef.current(token);
   }
 
   function scheduleTokenExpiry(token: string) {
@@ -309,7 +521,8 @@ export default function WebviewScreen() {
         try {
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const ss = require("expo-secure-store");
-          ss.deleteItemAsync("jwt").catch(() => {});
+          ss.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
+          ss.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
         } catch {}
         void exitToHome();
         return;
@@ -329,16 +542,32 @@ export default function WebviewScreen() {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const ss = require("expo-secure-store");
-      const tokenRaw = await ss.getItemAsync("jwt");
+      const cmmsRaw = await ss.getItemAsync(CMMS_AUTH_STORAGE_KEY);
+      const legacyRaw = await ss.getItemAsync(LEGACY_AUTH_STORAGE_KEY);
+      const tokenRaw = cmmsRaw ?? legacyRaw;
       const token = typeof tokenRaw === "string" ? tokenRaw.trim() : "";
+
+      console.log(
+        "[WebView] Read stored token:",
+        token ? `${token.substring(0, 24)}...` : "none",
+        "from secure storage"
+      );
+      console.log("[WebView] SecureStore lookup order:", CMMS_AUTH_STORAGE_KEY, "then", LEGACY_AUTH_STORAGE_KEY);
 
       if (!token) return null;
 
       const expiry = getTokenExpiry(token);
       if (expiry && expiry <= Date.now()) {
         console.log("[WebView] Stored token already expired, clearing");
-        await ss.deleteItemAsync("jwt").catch(() => {});
+        await ss.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
+        await ss.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
         return null;
+      }
+
+      if (cmmsRaw) {
+        await ss.setItemAsync(CMMS_AUTH_STORAGE_KEY, token).catch(() => {});
+      } else if (legacyRaw) {
+        await ss.setItemAsync(LEGACY_AUTH_STORAGE_KEY, token).catch(() => {});
       }
 
       return token;
@@ -349,9 +578,19 @@ export default function WebviewScreen() {
   }
 
   async function restoreSavedUrlFromStorage() {
-    if (normalizedProvidedUrlRef.current) return;
-    if (currentUrlRef.current && currentUrlRef.current !== sourceUriRef.current) return;
-    if (restoreUrlRef.current) return restoreUrlRef.current;
+    console.log("[WebView] restoreSavedUrlFromStorage() called");
+    if (normalizedProvidedUrlRef.current) {
+      console.log("[WebView] Restore skipped because siteUrl param was provided:", normalizedProvidedUrlRef.current);
+      return;
+    }
+    if (currentUrlRef.current && currentUrlRef.current !== sourceUriRef.current) {
+      console.log("[WebView] Restore skipped because currentUrl already differs from source:", currentUrlRef.current);
+      return;
+    }
+    if (restoreUrlRef.current) {
+      console.log("[WebView] Restore already in progress");
+      return restoreUrlRef.current;
+    }
 
     restoreUrlRef.current = (async () => {
       try {
@@ -364,18 +603,24 @@ export default function WebviewScreen() {
         }
 
         const storageKey = `webview_url_${STORAGE_SCOPE}`;
+        console.log("[WebView] Looking for last visit URL in storage key:", storageKey);
         const token = await readValidStoredToken();
         if (!token) {
-          console.log("[WebView] No token found, clearing saved URL");
-          await AsyncStorage.removeItem(storageKey).catch(() => {});
+          console.log("[WebView] No token found yet, deferring URL restore");
           return;
         }
 
         const savedUrl = await AsyncStorage.getItem(storageKey);
+        console.log("[WebView] Raw saved URL from storage:", savedUrl || "none");
         const normalizedSavedUrl = normalizeUrl(savedUrl);
-        if (!normalizedSavedUrl) return;
+        console.log("[WebView] Normalized saved URL:", normalizedSavedUrl || "none");
+        if (!normalizedSavedUrl) {
+          console.log("[WebView] No saved URL to restore");
+          return;
+        }
 
         console.log("[WebView] Token valid, restored URL from storage:", normalizedSavedUrl);
+        console.log("[WebView] Setting initialUrl/currentUrl to restored URL");
         setInitialUrl(normalizedSavedUrl);
         setCurrentUrl(normalizedSavedUrl);
         void maybeReloadIfWebsiteChanged(normalizedSavedUrl);
@@ -393,10 +638,22 @@ export default function WebviewScreen() {
     let mounted = true;
 
     (async () => {
+      console.log("[WebView] Session bootstrap started");
+      const storedToken = await readValidStoredToken();
+      console.log(
+        "[WebView] Bootstrap token loaded from SecureStore:",
+        storedToken ? `${storedToken.substring(0, 24)}...` : "none"
+      );
+      if (mounted) {
+        setBootstrapAuthToken(storedToken);
+      }
+
       await restoreSavedUrlFromStorage();
       await postAuthToken();
+      console.log("[WebView] Session bootstrap complete");
       if (mounted) setIsSessionHydrated(true);
     })().catch(() => {
+      console.log("[WebView] Session bootstrap failed");
       if (mounted) setIsSessionHydrated(true);
     });
 
@@ -407,6 +664,7 @@ export default function WebviewScreen() {
 
   async function maybeReloadIfWebsiteChanged(targetUrl: string = currentUrl || sourceUri) {
     if (versionProbeRef.current) {
+      console.log("[WebView] Version probe already running");
       return versionProbeRef.current;
     }
 
@@ -419,6 +677,7 @@ export default function WebviewScreen() {
         if (!AsyncStorage) return;
 
         const versionKey = `webview_remote_version_${STORAGE_SCOPE}`;
+        console.log("[WebView] Checking remote version using source URI:", sourceUri);
         const response = await fetch(sourceUri, {
           method: "HEAD",
           cache: "no-store",
@@ -433,15 +692,20 @@ export default function WebviewScreen() {
           .join("|");
 
         if (!fingerprint) {
+          console.log("[WebView] No remote fingerprint found; skipping reload check");
           return;
         }
 
         const previousFingerprint = await AsyncStorage.getItem(versionKey);
+        console.log("[WebView] Remote fingerprint:", fingerprint);
+        console.log("[WebView] Previous remote fingerprint:", previousFingerprint || "none");
         if (previousFingerprint && previousFingerprint !== fingerprint) {
           const refreshUrl = addCacheBuster(targetUrl, fingerprint);
           console.log("[WebView] Website changed, reloading with cache buster:", refreshUrl);
           setInitialUrl(refreshUrl);
           setCurrentUrl(refreshUrl);
+        } else {
+          console.log("[WebView] Website fingerprint unchanged; keeping current URL");
         }
 
         if (previousFingerprint !== fingerprint) {
@@ -472,7 +736,8 @@ export default function WebviewScreen() {
       await AsyncStorage.removeItem("webview_last_state");
       await AsyncStorage.removeItem(`webview_url_${STORAGE_SCOPE}`);
       await AsyncStorage.removeItem(`webview_remote_version_${STORAGE_SCOPE}`);
-      await SecureStore.deleteItemAsync("jwt").catch(() => {});
+      await SecureStore.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
+      await SecureStore.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
     } catch (err) {
       console.log("[WebView] Failed to clear saved launch state:", err);
     }
@@ -480,6 +745,7 @@ export default function WebviewScreen() {
 
   async function exitToHome() {
     setPreventRemove(false);
+    clearPushSyncRetry();
     await clearSavedLaunchState();
     router.replace("/");
   }
@@ -498,6 +764,7 @@ export default function WebviewScreen() {
         }
         
         const storageKey = `webview_url_${STORAGE_SCOPE}`;
+        console.log("[WebView] Saving current URL to storage:", normalizeUrl(currentUrl));
         AsyncStorage.setItem(storageKey, normalizeUrl(currentUrl)).catch((err: any) =>
           console.log("[WebView] Failed to save URL:", err)
         );
@@ -534,6 +801,7 @@ export default function WebviewScreen() {
 
   async function postAuthToken() {
     try {
+      console.log("[WebView] postAuthToken() called");
       const token = await readValidStoredToken();
 
       if (!token) {
@@ -541,6 +809,8 @@ export default function WebviewScreen() {
         return;
       }
 
+      console.log("[WebView] Posting token into WebView");
+      clearPushSyncRetry();
       scheduleTokenExpiry(token);
       deliverTokenToWebView(token);
     } catch (err) {
@@ -566,10 +836,22 @@ export default function WebviewScreen() {
         return;
       }
 
-      const storedAuthToken = authToken ?? (await SecureStore.getItemAsync("jwt"));
+      let storedAuthToken = authToken ?? (await SecureStore.getItemAsync(LEGACY_AUTH_STORAGE_KEY));
+      console.log(
+        "[Push] Legacy JWT selected for push sync:",
+        storedAuthToken ? `${String(storedAuthToken).substring(0, 24)}...` : "none",
+        authToken ? "from argument" : "from SecureStore"
+      );
       if (!storedAuthToken) {
-        console.log("[Push] No auth token available yet; skipping push-token sync");
-        return;
+        storedAuthToken = await waitForLegacyJwtToken(SecureStore);
+        console.log(
+          "[Push] Legacy JWT selected for push sync after wait:",
+          storedAuthToken ? `${String(storedAuthToken).substring(0, 24)}...` : "none"
+        );
+        if (!storedAuthToken) {
+          console.log("[Push] Legacy JWT wait ended without a token; push sync paused");
+          return;
+        }
       }
 
       // Log limited auth token info for debugging (don't log full token in production)
@@ -653,6 +935,7 @@ export default function WebviewScreen() {
       if (currentOwner) {
         await AsyncStorage.setItem(ownerKey, currentOwner).catch(() => {});
       }
+      clearPushSyncRetry();
       console.log("[Push] Expo push token synced to backend");
     } catch (err) {
       console.log("[Push] Error syncing Expo push token:", err);
@@ -661,21 +944,27 @@ export default function WebviewScreen() {
 
   useEffect(() => {
     // Post stored token when screen mounts and when app returns to foreground
+    console.log("[WebView] Initial auth/push bootstrap running");
     postAuthToken();
-    syncExpoPushTokenToBackend();
+    void syncExpoPushTokenToBackend();
     void maybeReloadIfWebsiteChanged();
     const sub = AppState.addEventListener("change", (state) => {
+      console.log("[WebView] AppState changed:", state);
       if (state === "active") {
+        console.log("[WebView] App became active - refreshing token, push sync, and last URL");
         postAuthToken();
-        syncExpoPushTokenToBackend();
+        void syncExpoPushTokenToBackend();
         void restoreSavedUrlFromStorage();
         void maybeReloadIfWebsiteChanged();
       }
     });
 
     return () => {
+      isMountedRef.current = false;
+      resolveLegacyJwtWait(null);
       try { sub.remove(); } catch { /* ignore older RN */ }
       if (tokenExpiryRef.current) clearTimeout(tokenExpiryRef.current);
+      clearPushSyncRetry();
     };
   }, []);
 
@@ -698,14 +987,9 @@ export default function WebviewScreen() {
         onNavigationStateChange={(navState) => {
           const nextUrl = normalizeUrl(navState.url);
           if (nextUrl && nextUrl !== sourceUri && nextUrl !== currentUrl) {
+            console.log("[WebView] Navigation state changed to:", nextUrl);
             setCurrentUrl(nextUrl);
           }
-        }}
-        onLoadStart={() => {
-          void postAuthToken();
-        }}
-        onLoadEnd={() => {
-          void postAuthToken();
         }}
         cacheEnabled={true}
         incognito={false}
@@ -725,143 +1009,7 @@ export default function WebviewScreen() {
           });
           return false;
         }}
-        injectedJavaScriptBeforeContentLoaded={`${getForceDarkScript()}(function(){window.__rn_injected=true; if(window.addEventListener){window.addEventListener('message', function(ev){ try{ var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data; console.log('[RN-Auth] Received message:', d); if(d && d.type === 'auth' && d.token){ console.log('[RN-Auth] Token received:', d.token.substring(0, 20) + '...'); try{ localStorage.setItem('jwt', d.token); console.log('[RN-Auth] Token saved to localStorage'); }catch(e){ console.error('[RN-Auth] Failed to save to localStorage:', e); } try{ /* also set cookie for servers that rely on cookies */ document.cookie = 'jwt=' + encodeURIComponent(d.token) + '; path=/; SameSite=None; Secure'; console.log('[RN-Auth] Cookie set'); }catch(e){ console.error('[RN-Auth] Failed to set cookie:', e); } try{ window.dispatchEvent(new CustomEvent('rn-auth',{detail:d.token})); console.log('[RN-Auth] Event dispatched'); }catch(e){ console.error('[RN-Auth] Failed to dispatch event:', e); } } }catch(e){ console.error('[RN-Auth] Error processing message:', e); } }); }
-          // Intercept localStorage.setItem to detect when the web app saves a JWT
-          try {
-            var _origSetItem = localStorage.setItem.bind(localStorage);
-            localStorage.setItem = function(key, value) {
-              try { _origSetItem(key, value); } catch (e) {}
-              try {
-                if (typeof key === 'string' && key.toLowerCase() === 'jwt' && value) {
-                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: String(value) })); } catch (e) {}
-                }
-              } catch (e) {}
-            };
-
-            // If a JWT already exists on load, notify React Native
-            try {
-              var __existing_jwt = localStorage.getItem('jwt') || localStorage.getItem('JWT');
-              if (__existing_jwt) {
-                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: __existing_jwt })); } catch (e) {}
-              }
-            } catch (e) {}
-
-            // Also listen to storage events (in case the JWT is written from another context)
-            window.addEventListener('storage', function(evt) {
-              try {
-                if (evt && (evt.key === 'jwt' || evt.key === 'JWT') && evt.newValue) {
-                  try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: evt.newValue })); } catch (e) {}
-                }
-              } catch (e) {}
-            });
-            // Lightweight cookie poller to catch non-HttpOnly jwt cookies set by the site
-            try {
-              var __cookiePollCount = 0;
-              var __cookiePoller = setInterval(function() {
-                try {
-                  var m = document.cookie.match(/(?:^|;\s*)jwt=([^;]+)/i);
-                  var cookieJwt = m ? decodeURIComponent(m[1]) : null;
-                  if (cookieJwt) {
-                    try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'auth', token: cookieJwt })); } catch (e) {}
-                    clearInterval(__cookiePoller);
-                    return;
-                  }
-                } catch (e) {}
-                __cookiePollCount++;
-                if (__cookiePollCount > 10) {
-                  try { clearInterval(__cookiePoller); } catch (e) {}
-                }
-              }, 1000);
-            } catch (e) {}
-
-            // Intercept fetch responses to look for tokens in JSON bodies or text
-            try {
-              var _origFetch = window.fetch.bind(window);
-              window.fetch = function() {
-                var args = Array.prototype.slice.call(arguments);
-                return _origFetch.apply(this, args).then(function(resp) {
-                  try {
-                    var cloned = resp.clone();
-                    cloned.text().then(function(text) {
-                      try {
-                        var ct = (cloned.headers && cloned.headers.get ? cloned.headers.get('content-type') : '') || '';
-                        var json = null;
-                        if (ct.toLowerCase().indexOf('application/json') !== -1) {
-                          try { json = JSON.parse(text); } catch (e) { json = null; }
-                        }
-
-                        var fieldNames = ['token','access_token','jwt','id_token'];
-                        if (json) {
-                          for (var i=0;i<fieldNames.length;i++){
-                            var k = fieldNames[i];
-                            if (json && typeof json[k] === 'string' && json[k].length>10) {
-                              try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: json[k]})); } catch (e) {}
-                              try { localStorage.setItem('jwt', json[k]); } catch (e) {}
-                              break;
-                            }
-                          }
-                        } else if (text) {
-                          var m = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/);
-                          if (m && m[0]) {
-                            try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: m[0]})); } catch (e) {}
-                            try { localStorage.setItem('jwt', m[0]); } catch (e) {}
-                          }
-                        }
-                      } catch (e) {}
-                    }).catch(function(){});
-                  } catch (e) {}
-                  return resp;
-                });
-              };
-            } catch (e) {}
-
-            // Intercept XHR to inspect JSON/text responses for tokens
-            try {
-              var _origXOpen = XMLHttpRequest.prototype.open;
-              var _origXSend = XMLHttpRequest.prototype.send;
-              XMLHttpRequest.prototype.open = function() {
-                try { this.__rn_xhr_url = arguments[1]; } catch (e) {}
-                return _origXOpen.apply(this, arguments);
-              };
-              XMLHttpRequest.prototype.send = function() {
-                try {
-                  this.addEventListener('readystatechange', function() {
-                    try {
-                      if (this.readyState === 4) {
-                        try {
-                          var ct = this.getResponseHeader ? (this.getResponseHeader('content-type')||'') : '';
-                          var text = this.responseText;
-                          var parsed = null;
-                          if (ct.toLowerCase().indexOf('application/json') !== -1) {
-                            try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
-                          }
-                          var fieldNames2 = ['token','access_token','jwt','id_token'];
-                          if (parsed) {
-                            for (var j=0;j<fieldNames2.length;j++){
-                              var kk = fieldNames2[j];
-                              if (parsed && typeof parsed[kk] === 'string' && parsed[kk].length>10) {
-                                try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: parsed[kk]})); } catch (e) {}
-                                try { localStorage.setItem('jwt', parsed[kk]); } catch (e) {}
-                                break;
-                              }
-                            }
-                          } else if (text) {
-                            var mm = text.match(/[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}/);
-                            if (mm && mm[0]) {
-                              try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'auth', token: mm[0]})); } catch (e) {}
-                              try { localStorage.setItem('jwt', mm[0]); } catch (e) {}
-                            }
-                          }
-                        } catch (e) {}
-                      }
-                    } catch (e) {}
-                  });
-                } catch (e) {}
-                return _origXSend.apply(this, arguments);
-              };
-            } catch (e) {}
-          } catch (e) {}
-        })();`}
+        injectedJavaScriptBeforeContentLoaded={buildBeforeContentJavaScript(bootstrapAuthToken)}
         injectedJavaScript={`(function() {
           function send(url) {
             try {
@@ -915,10 +1063,42 @@ export default function WebviewScreen() {
             const data = JSON.parse(event.nativeEvent.data);
             console.log("[WebView] Message received from page:", JSON.stringify(data).substring(0, 100));
 
-            if ((data.type === "auth" || data.type === "TOKEN") && typeof data.token === "string") {
-              console.log("[WebView] 🔐 AUTH TOKEN RECEIVED from page:", data.token.substring(0, 30) + "...");
+            const candidateToken =
+              extractTokenFromPayload(data) ||
+              (typeof data.token === "string" && data.token) ||
+              (typeof data.jwt === "string" && data.jwt) ||
+              (typeof data.access_token === "string" && data.access_token) ||
+              (typeof data.authToken === "string" && data.authToken) ||
+              (typeof data.auth_token === "string" && data.auth_token) ||
+              (typeof data.legacy_jwt === "string" && data.legacy_jwt) ||
+              (typeof data.cmms_auth_token === "string" && data.cmms_auth_token) ||
+              "";
 
-              const expiryMs = getTokenExpiry(data.token);
+            const tokenType = typeof data.type === "string" ? data.type.toLowerCase() : "";
+            const tokenLooksValid = typeof candidateToken === "string" && candidateToken.length > 20 && candidateToken.includes(".");
+
+            if (
+              tokenLooksValid &&
+              (
+                tokenType === "auth" ||
+                tokenType === "token" ||
+                tokenType === "token_ready" ||
+                tokenType === "jwt" ||
+                tokenType === "legacy_jwt" ||
+                tokenType === "access_token" ||
+                tokenType === "auth_token" ||
+                tokenType === "cmms_token" ||
+                tokenType === "cmms_auth_token" ||
+                tokenType === "tokenreceived" ||
+                tokenType === "token_received" ||
+                tokenType === ""
+              )
+            ) {
+              console.log("[WebView] 🔐 AUTH TOKEN RECEIVED from page:", candidateToken.substring(0, 30) + "...");
+              console.log("[WebView] Page token length:", candidateToken.length);
+              console.log("[WebView] Auth token source:", data.source || data.type || "unknown");
+
+              const expiryMs = getTokenExpiry(candidateToken);
               if (expiryMs && expiryMs <= Date.now()) {
                 console.log("[WebView] ⛔ Ignoring expired auth token from page");
                 clearWebViewAuthState();
@@ -926,16 +1106,37 @@ export default function WebviewScreen() {
                 return;
               }
 
-              scheduleTokenExpiry(data.token);
+              scheduleTokenExpiry(candidateToken);
               
-              // Save token coming from the web page into secure storage so RN can reuse it
+              // Save the token into the matching secure storage key so CMMS auth and legacy push auth stay separate.
               try {
                 // runtime require to avoid static resolution issues
                 // eslint-disable-next-line @typescript-eslint/no-var-requires
                 const ss = require("expo-secure-store");
-                ss.setItemAsync("jwt", data.token).then(() => {
+                const source = typeof data.source === "string" ? data.source.toLowerCase() : "";
+                const looksLegacy = source.includes("jwt") || source.includes("legacy") || data.type === "TOKEN";
+                const looksCmms = source.includes("cmms_auth_token") || source.includes("cmms");
+                const saveLegacy = looksLegacy || !looksCmms;
+                const saveCmms = looksCmms || !looksLegacy;
+                console.log("[WebView] Saving auth token to SecureStore keys:", { saveLegacy, saveCmms });
+                Promise.all([
+                  saveLegacy ? ss.setItemAsync(LEGACY_AUTH_STORAGE_KEY, candidateToken) : Promise.resolve(),
+                  saveCmms ? ss.setItemAsync(CMMS_AUTH_STORAGE_KEY, candidateToken) : Promise.resolve(),
+                ]).then(() => {
+                  if (saveCmms) {
+                    setBootstrapAuthToken(candidateToken);
+                  }
+                  clearPushSyncRetry();
+                  if (saveLegacy) {
+                    resolveLegacyJwtWait(candidateToken);
+                  }
                   console.log("[WebView] ✅ Token SAVED to SecureStore successfully");
-                  syncExpoPushTokenToBackend(data.token);
+                  void restoreSavedUrlFromStorage();
+                  if (saveLegacy) {
+                    void syncExpoPushTokenToBackend(candidateToken);
+                  } else {
+                    void syncExpoPushTokenToBackend();
+                  }
                 }).catch((err: any) => {
                   console.log("[WebView] ❌ Failed saving token to SecureStore:", err);
                 });
@@ -973,6 +1174,7 @@ export default function WebviewScreen() {
             if (data.type === "route") {
               const url = typeof data.url === "string" ? data.url : "";
               const nextUrl = normalizeUrl(url);
+              console.log("[WebView] Route message received:", nextUrl || "none");
               if (nextUrl && nextUrl !== currentUrl) {
                 setCurrentUrl(nextUrl);
               }

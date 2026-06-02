@@ -235,7 +235,7 @@ function buildAuthDiscoveryScript() {
         try {
           if (!storage) return;
 
-          var directKeys = ['${LEGACY_AUTH_STORAGE_KEY}', '${CMMS_AUTH_STORAGE_KEY}'];
+          var directKeys = ['${CMMS_AUTH_STORAGE_KEY}', '${LEGACY_AUTH_STORAGE_KEY}'];
           for (var i = 0; i < directKeys.length; i++) {
             var directValue = storage.getItem(directKeys[i]);
             if (looksLikeAuthValue(directValue)) {
@@ -265,7 +265,7 @@ function buildAuthDiscoveryScript() {
             if (eqIndex === -1) continue;
             var key = part.substring(0, eqIndex);
             var value = decodeURIComponent(part.substring(eqIndex + 1));
-            if (key === '${LEGACY_AUTH_STORAGE_KEY}' && looksLikeAuthValue(value)) {
+            if (key === '${CMMS_AUTH_STORAGE_KEY}' && looksLikeAuthValue(value)) {
               postToken(value, 'cookie:' + key);
               return;
             }
@@ -277,7 +277,7 @@ function buildAuthDiscoveryScript() {
             if (cmmsEq === -1) continue;
             var cmmsKey = cmmsPart.substring(0, cmmsEq);
             var cmmsValue = decodeURIComponent(cmmsPart.substring(cmmsEq + 1));
-            if (cmmsKey === '${CMMS_AUTH_STORAGE_KEY}' && looksLikeAuthValue(cmmsValue)) {
+            if (cmmsKey === '${LEGACY_AUTH_STORAGE_KEY}' && looksLikeAuthValue(cmmsValue)) {
               postToken(cmmsValue, 'cookie:' + cmmsKey);
               return;
             }

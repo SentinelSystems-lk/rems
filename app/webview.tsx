@@ -572,6 +572,61 @@ async function readStoredAuthToken(requireNonPending = false) {
   }
 }
 
+async function readLegacyJwtForPushSync(requireNonPending = false) {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ss = require("expo-secure-store");
+
+    const legacyRaw = await ss.getItemAsync(LEGACY_AUTH_STORAGE_KEY);
+    const cmmsRaw = await ss.getItemAsync(CMMS_AUTH_STORAGE_KEY);
+
+    const candidates = [
+      { key: LEGACY_AUTH_STORAGE_KEY, value: legacyRaw },
+      { key: CMMS_AUTH_STORAGE_KEY, value: cmmsRaw },
+    ]
+      .map((entry) => ({
+        key: entry.key,
+        value: typeof entry.value === "string" ? entry.value.trim() : "",
+      }))
+      .filter((entry) => Boolean(entry.value));
+
+    let sawExpiredToken = false;
+
+    for (const candidate of candidates) {
+      const expiry = getTokenExpiry(candidate.value);
+      if (expiry && expiry <= Date.now()) {
+        sawExpiredToken = true;
+        continue;
+      }
+
+      if (requireNonPending && isPendingAuthToken(candidate.value)) {
+        continue;
+      }
+
+      return candidate;
+    }
+
+    if (sawExpiredToken) {
+      await ss.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
+      await ss.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
+    }
+
+    if (!requireNonPending) {
+      for (const candidate of candidates) {
+        const expiry = getTokenExpiry(candidate.value);
+        if (!expiry || expiry > Date.now()) {
+          return candidate;
+        }
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.log("[Push] Failed to read legacy jwt for push sync:", err);
+    return null;
+  }
+}
+
 function buildBeforeContentJavaScript(token: string | null) {
   const bootstrapScript = token ? buildCmmsTokenInjectionScript(token) : "true;";
   const hasBootstrapToken = Boolean(token);
@@ -611,6 +666,7 @@ export default function WebviewScreen() {
   const currentUrlRef = useRef(currentUrl);
   const sourceUriRef = useRef(sourceUri);
   const normalizedProvidedUrlRef = useRef(normalizedProvidedUrl);
+  const bootstrapAuthTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     currentUrlRef.current = currentUrl;
@@ -623,6 +679,10 @@ export default function WebviewScreen() {
   useEffect(() => {
     normalizedProvidedUrlRef.current = normalizedProvidedUrl;
   }, [normalizedProvidedUrl]);
+
+  useEffect(() => {
+    bootstrapAuthTokenRef.current = bootstrapAuthToken;
+  }, [bootstrapAuthToken]);
 
   useEffect(() => {
     // If a siteUrl param was provided, prefer it and skip overwriting initialUrl.
@@ -708,13 +768,17 @@ export default function WebviewScreen() {
       return pushJwtWaitRef.current;
     }
 
-    const token = await readStoredAuthToken(true);
-    if (token) {
-      console.log("[Push] Auth token became available:", `${token.substring(0, 24)}...`);
-      return token;
+    const token = await readLegacyJwtForPushSync(true);
+    if (token?.value) {
+      console.log(
+        "[Push] Auth token became available from SecureStore key:",
+        token.key,
+        `${token.value.substring(0, 24)}...`
+      );
+      return token.value;
     }
 
-    console.log("[Push] Auth token is still pending 2FA; waiting for final token");
+    console.log(`[Push] Waiting for auth token in SecureStore key "${LEGACY_AUTH_STORAGE_KEY}" before push sync`);
 
     pushJwtWaitRef.current = new Promise<string | null>((resolve) => {
       pushJwtResolveRef.current = resolve;
@@ -1174,16 +1238,17 @@ export default function WebviewScreen() {
     // Post stored token when screen mounts and when app returns to foreground
     console.log("[WebView] Initial auth/push bootstrap running");
     postAuthToken();
-    void syncExpoPushTokenToBackend();
     void maybeReloadIfWebsiteChanged();
     const sub = AppState.addEventListener("change", (state) => {
       console.log("[WebView] AppState changed:", state);
       if (state === "active") {
         console.log("[WebView] App became active - refreshing token, push sync, and last URL");
         postAuthToken();
-        void syncExpoPushTokenToBackend();
         void restoreSavedUrlFromStorage();
         void maybeReloadIfWebsiteChanged();
+        if (bootstrapAuthTokenRef.current) {
+          void syncExpoPushTokenToBackend(bootstrapAuthTokenRef.current);
+        }
       }
     });
 
@@ -1195,6 +1260,17 @@ export default function WebviewScreen() {
       clearPushSyncRetry();
     };
   }, []);
+
+  // Push registration should only run after we have a hydrated session and a real JWT.
+  /* eslint-disable react-hooks/exhaustive-deps */
+  useEffect(() => {
+    if (!isSessionHydrated || !bootstrapAuthToken) {
+      return;
+    }
+
+    void syncExpoPushTokenToBackend(bootstrapAuthToken);
+  }, [bootstrapAuthToken, isSessionHydrated]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   if (!isSessionHydrated) {
     return (

@@ -19,7 +19,7 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       },
-      "buildNumber": "4"
+      "buildNumber": "7"
     },
     "android": {
       "adaptiveIcon": {
@@ -73,6 +73,7 @@
     },
     "extra": {
       "router": {},
+      "backendUrl": "https://rems.sentinel.lk/api",
       "eas": {
         "projectId": "f446f3e2-106e-490e-aae2-62e3ce27a086"
       }

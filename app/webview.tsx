@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { AppState, BackHandler, Linking, Platform, StyleSheet, useColorScheme } from "react-native";
+import { ActivityIndicator, AppState, BackHandler, Linking, Platform, StyleSheet, Text, View, useColorScheme } from "react-native";
 import { StatusBar, StatusBarStyle } from "expo-status-bar";
 import Constants from "expo-constants";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -581,7 +581,6 @@ function buildBeforeContentJavaScript(token: string | null) {
 
 export default function WebviewScreen() {
   const webviewRef = useRef<any>(null);
-  const router = useRouter();
   const { siteUrl } = useLocalSearchParams<{ siteUrl?: string }>();
   const sourceUri = normalizeUrl(getSourceUri());
   const providedSiteUrl = Array.isArray(siteUrl) ? siteUrl[0] : siteUrl;
@@ -598,6 +597,8 @@ export default function WebviewScreen() {
   const [currentUrl, setCurrentUrl] = useState(sourceUri);
   const [isSessionHydrated, setIsSessionHydrated] = useState(false);
   const [bootstrapAuthToken, setBootstrapAuthToken] = useState<string | null>(null);
+  const [isReloginRequired, setIsReloginRequired] = useState(false);
+  const [reloginMessage, setReloginMessage] = useState("Your session expired. Please sign in again.");
   const tokenExpiryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pushSyncRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pushSyncInFlightRef = useRef(false);
@@ -606,6 +607,7 @@ export default function WebviewScreen() {
   const isMountedRef = useRef(true);
   const versionProbeRef = useRef<Promise<void> | null>(null);
   const restoreUrlRef = useRef<Promise<void> | null>(null);
+  const reloginInProgressRef = useRef(false);
   const currentUrlRef = useRef(currentUrl);
   const sourceUriRef = useRef(sourceUri);
   const normalizedProvidedUrlRef = useRef(normalizedProvidedUrl);
@@ -681,6 +683,26 @@ export default function WebviewScreen() {
     }
   }
 
+  function clearTokenExpiryTimer() {
+    if (tokenExpiryRef.current) {
+      clearTimeout(tokenExpiryRef.current);
+      tokenExpiryRef.current = null;
+    }
+  }
+
+  function navigateWebViewTo(url: string) {
+    const webview = webviewRef.current;
+    if (!webview || typeof webview.injectJavaScript !== "function") {
+      return;
+    }
+
+    try {
+      webview.injectJavaScript(`(function(){ try { window.location.replace(${JSON.stringify(url)}); } catch (e) {} })(); true;`);
+    } catch (err) {
+      console.log("[WebView] Failed to redirect WebView:", err);
+    }
+  }
+
   async function waitForLegacyJwtToken() {
     if (pushJwtWaitRef.current) {
       return pushJwtWaitRef.current;
@@ -726,13 +748,7 @@ export default function WebviewScreen() {
       const remainingMs = expiryMs - Date.now();
       if (remainingMs <= 0) {
         console.log("[WebView] ⏱️ Token has EXPIRED - clearing storage");
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const ss = require("expo-secure-store");
-          ss.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
-          ss.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
-        } catch {}
-        void exitToHome();
+        void enterReloginState("expired");
         return;
       }
 
@@ -904,6 +920,7 @@ export default function WebviewScreen() {
   async function clearSavedLaunchState() {
     try {
       clearWebViewAuthState();
+      clearTokenExpiryTimer();
 
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const AsyncStorageModule = require("@react-native-async-storage/async-storage");
@@ -911,11 +928,12 @@ export default function WebviewScreen() {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const SecureStore = require("expo-secure-store");
 
-      if (!AsyncStorage) return;
+      if (AsyncStorage) {
+        await AsyncStorage.removeItem("webview_last_state");
+        await AsyncStorage.removeItem(`webview_url_${STORAGE_SCOPE}`);
+        await AsyncStorage.removeItem(`webview_remote_version_${STORAGE_SCOPE}`);
+      }
 
-      await AsyncStorage.removeItem("webview_last_state");
-      await AsyncStorage.removeItem(`webview_url_${STORAGE_SCOPE}`);
-      await AsyncStorage.removeItem(`webview_remote_version_${STORAGE_SCOPE}`);
       await SecureStore.deleteItemAsync(CMMS_AUTH_STORAGE_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(LEGACY_AUTH_STORAGE_KEY).catch(() => {});
     } catch (err) {
@@ -923,11 +941,29 @@ export default function WebviewScreen() {
     }
   }
 
-  async function exitToHome() {
-    setPreventRemove(false);
+  function enterReloginState(reason: "expired" | "logout" = "expired") {
+    if (reloginInProgressRef.current) {
+      return;
+    }
+
+    reloginInProgressRef.current = true;
+    setPreventRemove(true);
     clearPushSyncRetry();
-    await clearSavedLaunchState();
-    router.replace("/");
+    clearTokenExpiryTimer();
+    setBootstrapAuthToken(null);
+    setIsReloginRequired(true);
+    setReloginMessage(
+      reason === "logout"
+        ? "You signed out successfully. Please sign in again to continue."
+        : "Your session expired. Please sign in again."
+    );
+    setBgColor(HEADER_BG_COLOR);
+    setStatusBarStyle("light");
+    void clearSavedLaunchState().finally(() => {
+      setCurrentUrl(sourceUri);
+      setInitialUrl(sourceUri);
+      navigateWebViewTo(sourceUri);
+    });
   }
 
   // Save current URL to storage when it changes
@@ -1176,6 +1212,12 @@ export default function WebviewScreen() {
         source={{ uri: initialUrl }}
         containerStyle={styles.webviewContainer}
         style={styles.webview}
+        onLoadEnd={(event) => {
+          const loadedUrl = normalizeUrl(event.nativeEvent.url);
+          if (isReloginRequired && loadedUrl === sourceUri) {
+            setIsReloginRequired(false);
+          }
+        }}
         onNavigationStateChange={(navState) => {
           const nextUrl = normalizeUrl(navState.url);
           if (nextUrl && nextUrl !== sourceUri && nextUrl !== currentUrl) {
@@ -1296,8 +1338,7 @@ export default function WebviewScreen() {
               const expiryMs = isPendingTwoFactor ? null : getTokenExpiry(candidateToken);
               if (expiryMs && expiryMs <= Date.now()) {
                 console.log("[WebView] ⛔ Ignoring expired auth token from page");
-                clearWebViewAuthState();
-                void exitToHome();
+                void enterReloginState("expired");
                 return;
               }
 
@@ -1330,6 +1371,8 @@ export default function WebviewScreen() {
                   saveCmms ? ss.setItemAsync(CMMS_AUTH_STORAGE_KEY, candidateToken) : Promise.resolve(),
                 ]).then(() => {
                   setBootstrapAuthToken(candidateToken);
+                  setIsReloginRequired(false);
+                  reloginInProgressRef.current = false;
                   if (!isPendingTwoFactor) {
                     clearPushSyncRetry();
                     resolveLegacyJwtWait(candidateToken);
@@ -1356,7 +1399,7 @@ export default function WebviewScreen() {
               data.type === "user_logout"
             ) {
               console.log("[WebView] Logout requested from page");
-              void exitToHome();
+              void enterReloginState("logout");
               return;
             }
 
@@ -1394,6 +1437,15 @@ export default function WebviewScreen() {
           }
         }}
       />
+      {isReloginRequired ? (
+        <View style={styles.reloginOverlay} pointerEvents="none">
+          <View style={styles.reloginCard}>
+            <ActivityIndicator size="small" color="#ffffff" />
+            <Text style={styles.reloginTitle}>Signing you in again</Text>
+            <Text style={styles.reloginText}>{reloginMessage}</Text>
+          </View>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -1413,5 +1465,38 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: HEADER_BG_COLOR,
+  },
+  reloginOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.68)",
+    paddingHorizontal: 20,
+  },
+  reloginCard: {
+    width: "100%",
+    maxWidth: 420,
+    alignItems: "center",
+    borderRadius: 24,
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+    backgroundColor: "rgba(15, 15, 15, 0.98)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+  },
+  reloginTitle: {
+    marginTop: 12,
+    color: "#ffffff",
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  reloginText: {
+    marginTop: 8,
+    color: "rgba(255, 255, 255, 0.86)",
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center",
   },
 });

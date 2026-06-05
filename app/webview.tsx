@@ -10,8 +10,8 @@ import * as SplashScreen from "expo-splash-screen";
 import { getBackendUrl } from "./config";
 
 const HEADER_BG_COLOR = "#0b0b0b";
-// const APP_URL = "http://localhost:5173/";
-const APP_URL = "https://7s6i6.sentinel.lk/";
+const APP_URL = "http://localhost:5173/";
+// const APP_URL = "https://7s6i6.sentinel.lk/";
 const STORAGE_SCOPE = "monitoring";
 const CMMS_AUTH_STORAGE_KEY = "cmms_auth_token";
 const LEGACY_AUTH_STORAGE_KEY = "jwt";
@@ -1513,15 +1513,6 @@ export default function WebviewScreen() {
           }
         }}
       />
-      {isReloginRequired ? (
-        <View style={styles.reloginOverlay} pointerEvents="none">
-          <View style={styles.reloginCard}>
-            <ActivityIndicator size="small" color="#ffffff" />
-            <Text style={styles.reloginTitle}>Signing you in again</Text>
-            <Text style={styles.reloginText}>{reloginMessage}</Text>
-          </View>
-        </View>
-      ) : null}
     </SafeAreaView>
   );
 }

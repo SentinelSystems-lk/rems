@@ -4,8 +4,8 @@ import { useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 
-const APP_URL = "http://localhost:5173/";
-// const APP_URL = "https://7s6i6.sentinel.lk/";
+// const APP_URL = "http://localhost:5173/";
+const APP_URL = "https://7s6i6.sentinel.lk/";
 
 function getVersionFileUrl() {
   try {

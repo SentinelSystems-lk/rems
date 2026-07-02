@@ -2,8 +2,8 @@ import { useEffect } from "react";
 import { Stack } from "expo-router";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
-// Keep native splash visible until app decides navigation (version check)
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 Notifications.setNotificationHandler({
@@ -26,15 +26,13 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <Stack 
-      screenOptions={{ headerShown: false }} 
-      initialRouteName="index"
-    >
-      <Stack.Screen name="index" />
-      <Stack.Screen 
-        name="webview" 
-        initialParams={{ mode: "monitoring" }}
-      />
-    </Stack>
+    <SafeAreaProvider>
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#0B0B0B" } }} initialRouteName="index">
+        <Stack.Screen name="index" />
+        <Stack.Screen name="pages/login" />
+        <Stack.Screen name="pages/plantlist" />
+        <Stack.Screen name="pages/home" />
+      </Stack>
+    </SafeAreaProvider>
   );
 }

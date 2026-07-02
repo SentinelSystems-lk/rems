@@ -18,7 +18,28 @@ function normalizeBackendBaseUrl(value: string) {
 
 export const BACKEND_BASE_URL =
   normalizeBackendBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_BACKEND_URL)) ||
+  normalizeBackendBaseUrl(getEnvValue(process.env.VITE_API_BASE_URL)) ||
   normalizeBackendBaseUrl(getEnvValue(Constants.expoConfig?.extra?.backendUrl));
+
+export const CMMS_BASE_URL =
+  normalizeBackendBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_CMMS_BASE_URL)) ||
+  normalizeBackendBaseUrl(getEnvValue(process.env.VITE_CMMS_BASE_URL)) ||
+  "";
+
+export const WS_BASE_URL =
+  normalizeBackendBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_WS_BASE_URL)) ||
+  normalizeBackendBaseUrl(getEnvValue(process.env.VITE_WS_BASE_URL)) ||
+  "";
+
+export const API_TIMEOUT_MS = (() => {
+  const raw =
+    getEnvValue(process.env.EXPO_PUBLIC_API_TIMEOUT_MS) ||
+    getEnvValue(process.env.VITE_API_TIMEOUT_MS) ||
+    getEnvValue(Constants.expoConfig?.extra?.apiTimeoutMs ? String(Constants.expoConfig.extra.apiTimeoutMs) : "");
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30000;
+})();
 
 export const FORCE_PUSH_SYNC = (() => {
   const v = getEnvValue(process.env.EXPO_PUBLIC_FORCE_PUSH_SYNC) || getEnvValue(Constants.expoConfig?.extra?.forcePushSync);
@@ -50,7 +71,7 @@ export function getBackendUrl(path: string) {
         rel = rel.slice(basePath.length + 1);
       }
     }
-  } catch (e) {
+  } catch {
     // ignore and join normally
   }
 

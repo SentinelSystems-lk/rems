@@ -16,6 +16,21 @@ function normalizeBackendBaseUrl(value: string) {
   return `http://${trimmed}`;
 }
 
+function normalizeWebSocketBaseUrl(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+
+  if (/^wss?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/^http/i, "ws");
+  }
+
+  return `ws://${trimmed}`;
+}
+
 export const BACKEND_BASE_URL =
   normalizeBackendBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_BACKEND_URL)) ||
   normalizeBackendBaseUrl(getEnvValue(process.env.VITE_API_BASE_URL)) ||
@@ -27,9 +42,14 @@ export const CMMS_BASE_URL =
   "";
 
 export const WS_BASE_URL =
-  normalizeBackendBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_WS_BASE_URL)) ||
-  normalizeBackendBaseUrl(getEnvValue(process.env.VITE_WS_BASE_URL)) ||
+  normalizeWebSocketBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_WS_BASE_URL)) ||
+  normalizeWebSocketBaseUrl(getEnvValue(process.env.VITE_WS_BASE_URL)) ||
   "";
+
+export const PERFORMANCE_BASE_URL =
+  normalizeBackendBaseUrl(getEnvValue(process.env.EXPO_PUBLIC_PERFORMANCE_URL)) ||
+  normalizeBackendBaseUrl(getEnvValue(process.env.VITE_PERFORMANCE_URL)) ||
+  "https://performance.sentinel.lk/api";
 
 export const API_TIMEOUT_MS = (() => {
   const raw =
@@ -76,4 +96,29 @@ export function getBackendUrl(path: string) {
   }
 
   return rel ? `${base}/${rel}` : base;
+}
+
+export function getPerformanceUrl(path: string) {
+  if (/^https?:\/\//i.test(path)) return path;
+  const base = PERFORMANCE_BASE_URL.replace(/\/+$/, "");
+  const rel = path.startsWith("/") ? path.replace(/^\/+/, "") : path;
+  return rel ? `${base}/${rel}` : base;
+}
+
+export function getWsBaseUrl() {
+  if (WS_BASE_URL) return WS_BASE_URL;
+
+  if (!BACKEND_BASE_URL) return "";
+
+  try {
+    const url = new URL(BACKEND_BASE_URL);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const pathname = url.pathname.replace(/\/+$/, "");
+    url.pathname = pathname ? `${pathname}/ws` : "/ws";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "";
+  }
 }

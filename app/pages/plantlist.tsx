@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -122,7 +121,11 @@ export default function PlantListPage() {
 
         <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
           {filteredPlants.map((plant) => (
-            <View key={plant.id} style={styles.card}>
+            <Pressable
+              key={plant.id}
+              onPress={() => router.push(`/pages/dashboard/${plant.id}`)}
+              style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+            >
               <View style={styles.cardStripe} />
 
               <View style={styles.cardHeader}>
@@ -158,21 +161,18 @@ export default function PlantListPage() {
               <View style={styles.footerRow}>
                 <View style={styles.statusIconWrap}>
                   {plant.statusLabel === "Warning" ? (
-                    <Ionicons name="warning" size={24} color="#FFB020" />
+                    <Ionicons name="warning" size={20} color="#FFB020" />
                   ) : (
-                    <Ionicons name="checkmark" size={24} color="#29DCA0" />
+                    <Ionicons name="checkmark" size={20} color="#29DCA0" />
                   )}
                 </View>
 
-                <Pressable
-                  onPress={() => Alert.alert("Plant details", "Plant details screen will be added next.")}
-                  style={({ pressed }) => [styles.detailsButton, pressed && styles.pressed]}
-                >
+                <View style={styles.detailsButton}>
                   <Text style={styles.detailsText}>View details</Text>
-                  <Ionicons name="arrow-forward" size={18} color="#1E6CFF" />
-                </Pressable>
+                  <Ionicons name="arrow-forward" size={16} color="#1E6CFF" />
+                </View>
               </View>
-            </View>
+            </Pressable>
           ))}
         </ScrollView>
       </View>
@@ -196,53 +196,53 @@ const styles = StyleSheet.create({
     backgroundColor: "#050505",
   },
   topSection: {
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 8,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 6,
   },
   logoRow: {
     alignItems: "center",
-    paddingBottom: 4,
+    paddingBottom: 2,
   },
   logo: {
-    width: 82,
-    height: 26,
+    width: 72,
+    height: 22,
   },
   divider: {
     height: 1,
     backgroundColor: "#1C1C1C",
-    marginBottom: 10,
+    marginBottom: 8,
   },
   headerRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
+    gap: 8,
   },
   headerTitleWrap: {
     flexDirection: "row",
     alignItems: "baseline",
-    gap: 10,
+    gap: 8,
   },
   headerTitle: {
     color: "#FCFCFC",
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "800",
   },
   headerCount: {
     color: "#7E7E7E",
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "500",
   },
   filterRow: {
     flexDirection: "row",
-    gap: 8,
+    gap: 6,
     flexShrink: 1,
   },
   filterChip: {
-    minHeight: 30,
+    minHeight: 26,
     borderRadius: 999,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
@@ -256,7 +256,7 @@ const styles = StyleSheet.create({
     borderColor: "#D2D2D2",
   },
   filterChipText: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "600",
   },
   filterChipTextActive: {
@@ -266,28 +266,31 @@ const styles = StyleSheet.create({
     color: "#FCFCFC",
   },
   listContent: {
-    paddingHorizontal: 14,
-    paddingBottom: 14,
-    gap: 10,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    gap: 8,
   },
   card: {
     backgroundColor: "#0B0B0B",
     borderColor: "#292929",
     borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 14,
-    gap: 10,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 12,
+    gap: 8,
+  },
+  cardPressed: {
+    opacity: 0.9,
   },
   cardStripe: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
-    height: 6,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
+    height: 5,
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
     backgroundColor: "#16C77D",
   },
   cardHeader: {
@@ -299,14 +302,14 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     color: "#FCFCFC",
-    fontSize: 18,
-    lineHeight: 22,
+    fontSize: 16,
+    lineHeight: 20,
     fontWeight: "800",
     flexShrink: 1,
   },
   statusPill: {
-    minHeight: 24,
-    paddingHorizontal: 10,
+    minHeight: 22,
+    paddingHorizontal: 8,
     borderRadius: 999,
     alignItems: "center",
     justifyContent: "center",
@@ -318,7 +321,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#2A2020",
   },
   statusPillText: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "700",
   },
   statusPillTextActive: {
@@ -331,39 +334,39 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "flex-start",
-    gap: 10,
+    gap: 8,
   },
   powerBlock: {
     flexDirection: "row",
     alignItems: "baseline",
-    gap: 6,
+    gap: 4,
   },
   powerValue: {
     color: "#FCFCFC",
-    fontSize: 36,
-    lineHeight: 40,
+    fontSize: 30,
+    lineHeight: 34,
     fontWeight: "900",
     letterSpacing: -1,
   },
   powerUnit: {
     color: "#FCFCFC",
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "500",
-    paddingBottom: 4,
+    paddingBottom: 3,
   },
   availabilityBlock: {
     alignItems: "flex-end",
-    paddingTop: 10,
+    paddingTop: 8,
   },
   smallLabel: {
     color: "#8C8C8C",
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "500",
   },
   availabilityValue: {
     marginTop: 2,
     color: "#8C8C8C",
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "600",
   },
   todayRow: {
@@ -373,30 +376,30 @@ const styles = StyleSheet.create({
   },
   energyValue: {
     color: "#FCFCFC",
-    fontSize: 12,
-    lineHeight: 16,
+    fontSize: 11,
+    lineHeight: 14,
     fontWeight: "600",
   },
   footerRow: {
     flexDirection: "row",
     alignItems: "flex-end",
     justifyContent: "space-between",
-    minHeight: 22,
+    minHeight: 20,
   },
   statusIconWrap: {
-    width: 20,
-    height: 20,
+    width: 18,
+    height: 18,
     alignItems: "flex-start",
     justifyContent: "flex-end",
   },
   detailsButton: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
+    gap: 3,
   },
   detailsText: {
     color: "#1E6CFF",
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700",
   },
   pressed: {

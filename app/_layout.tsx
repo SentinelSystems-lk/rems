@@ -31,6 +31,7 @@ export default function RootLayout() {
         <Stack.Screen name="index" />
         <Stack.Screen name="pages/login" />
         <Stack.Screen name="pages/plantlist" />
+        <Stack.Screen name="pages/dashboard/[plantId]" />
         <Stack.Screen name="pages/home" />
       </Stack>
     </SafeAreaProvider>
